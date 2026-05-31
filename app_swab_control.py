@@ -46,10 +46,10 @@ def convertir_numero(serie):
     return pd.to_numeric(serie, errors="coerce").fillna(0)
 
 
-@st.cache_data(show_spinner=False)
 def cargar_excel(bytes_excel):
     """
     Carga el Excel en memoria.
+    No se usa st.cache_data aquí porque pd.ExcelFile no es serializable.
     """
     return pd.ExcelFile(io.BytesIO(bytes_excel))
 
@@ -150,7 +150,6 @@ def cargar_convertidos(bytes_excel, anio):
     if hoja is None:
         return pd.DataFrame()
 
-    # La fila 2 del Excel contiene los encabezados reales.
     df = pd.read_excel(xls, sheet_name=hoja, header=1)
 
     if df.shape[1] <= 3:
@@ -449,7 +448,6 @@ if convertidos.empty:
     st.warning(f"No encontré pozos convertidos para {anio_sel}.")
     st.stop()
 
-# Cruzar convertidos con performance por unidad.
 tabla_convertidos_unidad = convertidos.merge(
     perf_unidad,
     on="POZO_KEY",
