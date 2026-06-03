@@ -1,725 +1,1196 @@
 import re
+import unicodedata
 from io import BytesIO
-from datetime import date
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 
 st.set_page_config(
-    page_title="Control de Producción por Swab",
-    layout="wide"
-)
-
-st.title("Control de Producción por Swab")
-st.caption(
-    "Carga el Excel de Producción por Swab para analizar producción, intervenciones "
-    "y pozos convertidos por periodo."
+    page_title="Análisis SWAB",
+    page_icon="🛢️",
+    layout="wide",
 )
 
 
-def normalizar_pozo(valor):
-    if pd.isna(valor):
+# ============================================================
+# Utilidades generales
+# ============================================================
+
+
+def normalize_text(value: object) -> str:
+    if value is None:
         return ""
-
-    texto = str(valor).upper().strip()
-    texto = re.sub(r"\s+", " ", texto)
-
-    return texto
-
-
-def leer_hoja_con_header(path_or_buffer, sheet_name):
-    crudo = pd.read_excel(path_or_buffer, sheet_name=sheet_name, header=None)
-
-    fila_header = None
-
-    for i in range(min(10, len(crudo))):
-        valores = crudo.iloc[i].astype(str).str.upper().tolist()
-
-        if "FECHA" in valores:
-            fila_header = i
-            break
-
-    if fila_header is None:
-        fila_header = 0
-
-    df = pd.read_excel(path_or_buffer, sheet_name=sheet_name, header=fila_header)
-    df = df.dropna(how="all")
-    df.columns = [str(c).strip() for c in df.columns]
-
-    return df
+    text = str(value).strip().lower()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    return text.strip("_")
 
 
-def obtener_pozos_convertidos(path_or_buffer, sheet_name, anio):
-    try:
-        df = leer_hoja_con_header(path_or_buffer, sheet_name)
-    except Exception:
+def find_column(columns: List[str], aliases: List[str]) -> Optional[str]:
+    normalized_map = {col: normalize_text(col) for col in columns}
+    normalized_aliases = [normalize_text(a) for a in aliases]
+
+    for col, norm_col in normalized_map.items():
+        if norm_col in normalized_aliases:
+            return col
+
+    for col, norm_col in normalized_map.items():
+        for alias in normalized_aliases:
+            if alias and alias in norm_col:
+                return col
+    return None
+
+
+def default_index(options: List[str], value: Optional[str]) -> int:
+    if value in options:
+        return options.index(value)
+    return 0
+
+
+def to_datetime_safe(series: pd.Series) -> pd.Series:
+    result = pd.to_datetime(series, errors="coerce", dayfirst=True)
+    if result.isna().mean() > 0.5:
+        result = pd.to_datetime(series, errors="coerce", dayfirst=False)
+    return result
+
+
+def to_numeric_safe(series: pd.Series) -> pd.Series:
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce")
+
+    clean = (
+        series.astype(str)
+        .str.replace(" ", "", regex=False)
+        .str.replace(",", ".", regex=False)
+        .str.replace(r"[^0-9.\-]", "", regex=True)
+    )
+    return pd.to_numeric(clean, errors="coerce")
+
+
+def normalize_well(value: object) -> str:
+    if pd.isna(value):
+        return ""
+    text = str(value).strip().upper()
+    text = re.sub(r"\s+", "", text)
+    return text
+
+
+def split_wells(text: str) -> List[str]:
+    if not text:
         return []
-
-    columnas = list(df.columns)
-
-    pozos = []
-
-    for col in columnas:
-        col_str = str(col).strip()
-
-        if col_str.upper() in ["FECHA", "N° INTERV", "N° INTERV.", "N° INTEV", "TOTAL", "NAN"]:
-            continue
-
-        if col_str == "" or col_str.lower() == "nan":
-            continue
-
-        if col_str.upper().startswith("UNNAMED"):
-            continue
-
-        serie = pd.to_numeric(df[col], errors="coerce")
-
-        if serie.notna().sum() == 0:
-            continue
-
-        pozo = normalizar_pozo(col_str)
-
-        if pozo:
-            pozos.append(pozo)
-
-    return sorted(list(dict.fromkeys(pozos)))
+    parts = re.split(r"[,;\n\t]+", text)
+    return [normalize_well(p) for p in parts if normalize_well(p)]
 
 
-def leer_datos_swab(path_or_buffer):
-    df = leer_hoja_con_header(path_or_buffer, "Datos de Swab")
+def read_uploaded_file(uploaded_file) -> Tuple[Dict[str, pd.DataFrame], str]:
+    """Lee CSV o Excel. Si es Excel retorna todas las hojas para poder detectar listas 2024, 2025 y 2026."""
+    if uploaded_file is None:
+        return {}, ""
 
-    columnas_upper = {str(c).strip().upper(): c for c in df.columns}
+    filename = uploaded_file.name.lower()
 
-    col_fecha = columnas_upper.get("FECHA")
-    col_pozo = columnas_upper.get("COD_POZ")
-    col_bateria = columnas_upper.get("COD_BAT")
-    col_unidad = columnas_upper.get("UNIDAD")
-    col_prcr = columnas_upper.get("PRCR")
-    col_prag = columnas_upper.get("PRAG")
-    col_corridas = columnas_upper.get("CORRIDAS")
+    if filename.endswith(".csv"):
+        try:
+            df = pd.read_csv(uploaded_file)
+        except UnicodeDecodeError:
+            uploaded_file.seek(0)
+            df = pd.read_csv(uploaded_file, encoding="latin1")
+        return {"Datos CSV": df}, "Datos CSV"
 
-    if col_fecha is None or col_pozo is None:
-        raise ValueError("No se encontró FECHA o COD_POZ en la hoja Datos de Swab.")
+    if filename.endswith((".xlsx", ".xls")):
+        data = uploaded_file.read()
+        xls = pd.ExcelFile(BytesIO(data))
+        sheets: Dict[str, pd.DataFrame] = {}
+        for sheet in xls.sheet_names:
+            try:
+                temp = pd.read_excel(BytesIO(data), sheet_name=sheet)
+                temp.columns = [str(c).strip() for c in temp.columns]
+                sheets[sheet] = temp
+            except Exception:
+                pass
+        preferred = pick_default_data_sheet(list(sheets.keys()))
+        return sheets, preferred
 
-    data = pd.DataFrame()
+    st.error("Formato no soportado. Carga un archivo .xlsx, .xls o .csv")
+    return {}, ""
 
-    data["fecha"] = pd.to_datetime(df[col_fecha], errors="coerce")
-    data["pozo"] = df[col_pozo].apply(normalizar_pozo)
 
-    if col_bateria:
-        data["bateria"] = df[col_bateria].astype(str).str.strip()
+def pick_default_data_sheet(sheet_names: List[str]) -> str:
+    if not sheet_names:
+        return ""
+    priority = ["datos_de_swab", "datos_swab", "produccion", "produccion_swab", "data"]
+    normalized = {sheet: normalize_text(sheet) for sheet in sheet_names}
+    for key in priority:
+        for sheet, norm in normalized.items():
+            if key in norm:
+                return sheet
+    return sheet_names[0]
+
+
+def pick_default_conversion_sheet(sheet_names: List[str], year: int) -> str:
+    normalized = {sheet: normalize_text(sheet) for sheet in sheet_names}
+    candidates = []
+    for sheet, norm in normalized.items():
+        if str(year) in norm and "estado" not in norm:
+            score = 0
+            if "swab" in norm:
+                score += 3
+            if "dia" in norm:
+                score += 2
+            if "convert" in norm:
+                score += 2
+            candidates.append((score, sheet))
+    if not candidates:
+        return "No usar hoja"
+    candidates.sort(reverse=True)
+    return candidates[0][1]
+
+
+def pick_default_basic_sheet(sheet_names: List[str]) -> str:
+    normalized = {sheet: normalize_text(sheet) for sheet in sheet_names}
+    for sheet, norm in normalized.items():
+        if "basica" in norm or "basico" in norm:
+            return sheet
+    for sheet, norm in normalized.items():
+        if "estado" in norm and "2024" in norm:
+            return sheet
+    return "No usar hoja"
+
+
+def extract_wells_from_sheet(sheet_df: Optional[pd.DataFrame]) -> Set[str]:
+    if sheet_df is None or sheet_df.empty:
+        return set()
+    columns = [str(c).strip() for c in sheet_df.columns]
+    well_col = find_column(columns, ["pozo", "well", "nombre pozo", "codigo pozo", "id pozo"])
+    if well_col is None:
+        # Si no reconoce la columna, usa la primera columna con más valores tipo texto.
+        best_col = None
+        best_count = -1
+        for col in columns:
+            count = sheet_df[col].astype(str).str.contains(r"[A-Z]{1,3}\s*\d+", case=False, regex=True, na=False).sum()
+            if count > best_count:
+                best_col = col
+                best_count = count
+        well_col = best_col
+    if well_col is None:
+        return set()
+    return set(sheet_df[well_col].map(normalize_well).dropna().loc[lambda s: s != ""].unique())
+
+
+def build_group_for_well(
+    well: str,
+    year_value: object,
+    year_col_enabled: bool,
+    wells_2024: Set[str],
+    wells_2025: Set[str],
+    wells_2026: Set[str],
+) -> str:
+    well_norm = normalize_well(well)
+
+    if year_col_enabled:
+        year = pd.to_numeric(pd.Series([year_value]), errors="coerce").iloc[0]
+        if pd.notna(year):
+            year = int(year)
+            if year in [2024, 2025, 2026]:
+                return f"Convertidos {year}"
+
+    if well_norm in wells_2024:
+        return "Convertidos 2024"
+    if well_norm in wells_2025:
+        return "Convertidos 2025"
+    if well_norm in wells_2026:
+        return "Convertidos 2026"
+    return "Producción básica"
+
+
+def classify_drop(row):
+    pct = row.get("Caída %", 0)
+    if pd.isna(pct):
+        return "Sin dato"
+    if pct >= 50:
+        return "Crítica"
+    if pct >= 30:
+        return "Fuerte"
+    if pct >= 15:
+        return "Moderada"
+    if pct > 0:
+        return "Leve"
+    return "Sin caída"
+
+
+def get_monthly(df: pd.DataFrame, date_col: str) -> pd.DataFrame:
+    temp = df.copy()
+    temp["Mes"] = temp[date_col].dt.to_period("M").dt.to_timestamp()
+    return temp
+
+
+def month_limits(month_start: pd.Timestamp) -> Tuple[pd.Timestamp, pd.Timestamp]:
+    start = pd.Timestamp(month_start).to_period("M").to_timestamp()
+    end = start + pd.offsets.MonthEnd(0)
+    return start, end
+
+
+def period_drop_by_well_calendar_month(
+    df: pd.DataFrame,
+    date_col: str,
+    well_col: str,
+    value_col: str,
+    battery_col: str,
+    current_month: pd.Timestamp,
+) -> pd.DataFrame:
+    if df.empty or value_col == "No aplica":
+        return pd.DataFrame()
+
+    current_start, current_end = month_limits(current_month)
+    previous_start = current_start - pd.DateOffset(months=1)
+    previous_start, previous_end = month_limits(previous_start)
+
+    current = df[(df[date_col] >= current_start) & (df[date_col] <= current_end)].copy()
+    previous = df[(df[date_col] >= previous_start) & (df[date_col] <= previous_end)].copy()
+
+    group_cols = [well_col, battery_col, "Grupo conversión"]
+    curr_sum = current.groupby(group_cols, dropna=False)[value_col].sum().reset_index(name="Producción mes de corte")
+    prev_sum = previous.groupby(group_cols, dropna=False)[value_col].sum().reset_index(name="Producción mes anterior")
+
+    base_keys = df[group_cols].drop_duplicates()
+    result = base_keys.merge(prev_sum, on=group_cols, how="left").merge(curr_sum, on=group_cols, how="left")
+    result[["Producción mes anterior", "Producción mes de corte"]] = result[
+        ["Producción mes anterior", "Producción mes de corte"]
+    ].fillna(0)
+    result["Caída producción"] = result["Producción mes anterior"] - result["Producción mes de corte"]
+    result["Caída %"] = np.where(
+        result["Producción mes anterior"] > 0,
+        result["Caída producción"] / result["Producción mes anterior"] * 100,
+        np.nan,
+    )
+    result["Clasificación"] = result.apply(classify_drop, axis=1)
+    return result.sort_values(["Caída producción", "Caída %"], ascending=[False, False])
+
+
+def period_drop_by_well_days(
+    df: pd.DataFrame,
+    date_col: str,
+    well_col: str,
+    value_col: str,
+    battery_col: str,
+    days: int,
+) -> pd.DataFrame:
+    if df.empty or value_col == "No aplica":
+        return pd.DataFrame()
+
+    max_date = df[date_col].max()
+    if pd.isna(max_date):
+        return pd.DataFrame()
+
+    current_start = max_date - pd.Timedelta(days=days - 1)
+    previous_end = current_start - pd.Timedelta(days=1)
+    previous_start = previous_end - pd.Timedelta(days=days - 1)
+
+    current = df[(df[date_col] >= current_start) & (df[date_col] <= max_date)].copy()
+    previous = df[(df[date_col] >= previous_start) & (df[date_col] <= previous_end)].copy()
+
+    group_cols = [well_col, battery_col, "Grupo conversión"]
+    curr_sum = current.groupby(group_cols, dropna=False)[value_col].sum().reset_index(name="Periodo actual")
+    prev_sum = previous.groupby(group_cols, dropna=False)[value_col].sum().reset_index(name="Periodo anterior")
+
+    result = pd.merge(prev_sum, curr_sum, on=group_cols, how="outer").fillna(0)
+    result["Caída"] = result["Periodo anterior"] - result["Periodo actual"]
+    result["Caída %"] = np.where(
+        result["Periodo anterior"] > 0,
+        result["Caída"] / result["Periodo anterior"] * 100,
+        np.nan,
+    )
+    result["Clasificación"] = result.apply(classify_drop, axis=1)
+    return result.sort_values(["Caída", "Caída %"], ascending=[False, False])
+
+
+def build_active_inactive_table(
+    df_scope: pd.DataFrame,
+    selected_wells: List[str],
+    date_col: str,
+    well_col: str,
+    battery_col: str,
+    status_value_col: str,
+    month_start_selected: pd.Timestamp,
+) -> pd.DataFrame:
+    if df_scope.empty:
+        return pd.DataFrame()
+
+    m_start, m_end = month_limits(month_start_selected)
+    selected_set = set(normalize_well(w) for w in selected_wells)
+    temp = df_scope[df_scope["Pozo_norm"].isin(selected_set)].copy()
+
+    if temp.empty:
+        return pd.DataFrame()
+
+    month_df = temp[(temp[date_col] >= m_start) & (temp[date_col] <= m_end)].copy()
+
+    base = temp[[well_col, "Pozo_norm", battery_col, "Grupo conversión"]].drop_duplicates("Pozo_norm").copy()
+
+    if status_value_col != "Intervenciones_calc":
+        monthly_prod = (
+            month_df.groupby("Pozo_norm", dropna=False)[status_value_col]
+            .sum()
+            .reset_index(name="Producción mes de corte")
+        )
+        total_prod = (
+            temp.groupby("Pozo_norm", dropna=False)[status_value_col]
+            .sum()
+            .reset_index(name="Producción total filtrada")
+        )
+        last_prod_date = (
+            temp[temp[status_value_col] > 0]
+            .groupby("Pozo_norm", dropna=False)[date_col]
+            .max()
+            .reset_index(name="Última fecha con producción")
+        )
     else:
-        data["bateria"] = ""
+        monthly_prod = (
+            month_df.groupby("Pozo_norm", dropna=False)["Intervenciones_calc"]
+            .sum()
+            .reset_index(name="Producción mes de corte")
+        )
+        total_prod = (
+            temp.groupby("Pozo_norm", dropna=False)["Intervenciones_calc"]
+            .sum()
+            .reset_index(name="Producción total filtrada")
+        )
+        last_prod_date = (
+            temp[temp["Intervenciones_calc"] > 0]
+            .groupby("Pozo_norm", dropna=False)[date_col]
+            .max()
+            .reset_index(name="Última fecha con producción")
+        )
 
-    if col_unidad:
-        data["unidad"] = df[col_unidad].astype(str).str.strip()
-    else:
-        data["unidad"] = ""
-
-    if col_prcr:
-        data["produccion"] = pd.to_numeric(df[col_prcr], errors="coerce").fillna(0)
-    else:
-        data["produccion"] = 0
-
-    if col_prag:
-        data["agua"] = pd.to_numeric(df[col_prag], errors="coerce").fillna(0)
-    else:
-        data["agua"] = 0
-
-    if col_corridas:
-        data["corridas"] = pd.to_numeric(df[col_corridas], errors="coerce").fillna(0)
-    else:
-        data["corridas"] = 0
-
-    data = data.dropna(subset=["fecha"])
-    data = data[data["pozo"] != ""].copy()
-
-    data["anio"] = data["fecha"].dt.year
-    data["mes"] = data["fecha"].dt.to_period("M").dt.to_timestamp()
-    data["intervenciones"] = 1
-
-    return data
-
-
-def clasificar_pozos(data, pozos_2024, pozos_2025, pozos_2026):
-    set_2024 = set(pozos_2024)
-    set_2025 = set(pozos_2025)
-    set_2026 = set(pozos_2026)
-
-    def clasificar(pozo):
-        if pozo in set_2024:
-            return "Convertidos 2024"
-
-        if pozo in set_2025:
-            return "Convertidos 2025"
-
-        if pozo in set_2026:
-            return "Convertidos 2026"
-
-        return "Producción básica"
-
-    data["grupo"] = data["pozo"].apply(clasificar)
-
-    return data
+    result = base.merge(monthly_prod, on="Pozo_norm", how="left")
+    result = result.merge(total_prod, on="Pozo_norm", how="left")
+    result = result.merge(last_prod_date, on="Pozo_norm", how="left")
+    result[["Producción mes de corte", "Producción total filtrada"]] = result[
+        ["Producción mes de corte", "Producción total filtrada"]
+    ].fillna(0)
+    result["Estado"] = np.where(result["Producción mes de corte"] > 0, "Activo", "Inactivo")
+    result["Mes evaluado"] = m_start.strftime("%Y-%m")
+    result["Días desde última producción"] = np.where(
+        result["Última fecha con producción"].notna(),
+        (m_end - result["Última fecha con producción"]).dt.days,
+        np.nan,
+    )
+    result = result.sort_values(["Estado", "Producción mes de corte", well_col], ascending=[True, False, True])
+    return result
 
 
-def formato_numero(valor, decimales=2):
-    try:
-        return f"{float(valor):,.{decimales}f}"
-    except Exception:
+def format_number(value, decimals=2):
+    if pd.isna(value):
         return "0"
+    return f"{value:,.{decimals}f}"
 
 
-def generar_documento_html(
-    fecha_inicio,
-    fecha_fin,
-    grupos,
-    pozos,
-    resumen_general,
-    resumen_pozo,
-    interv_mes
-):
-    grupos_txt = ", ".join(grupos)
-    pozos_txt = "Todos los pozos seleccionados" if len(pozos) > 20 else ", ".join(pozos)
-
-    filas_pozo = ""
-
-    for _, row in resumen_pozo.head(50).iterrows():
-        filas_pozo += f"""
-        <tr>
-            <td>{row['pozo']}</td>
-            <td>{row['grupo']}</td>
-            <td style="text-align:right">{formato_numero(row['produccion_total'], 2)}</td>
-            <td style="text-align:right">{int(row['intervenciones_total'])}</td>
-            <td style="text-align:right">{formato_numero(row['produccion_por_intervencion'], 2)}</td>
-            <td>{row['primera_fecha'].date()}</td>
-            <td>{row['ultima_fecha'].date()}</td>
-        </tr>
-        """
-
-    filas_mes = ""
-
-    for _, row in interv_mes.iterrows():
-        filas_mes += f"""
-        <tr>
-            <td>{row['mes'].strftime('%Y-%m')}</td>
-            <td>{row['grupo']}</td>
-            <td style="text-align:right">{int(row['intervenciones'])}</td>
-            <td style="text-align:right">{formato_numero(row['produccion'], 2)}</td>
-        </tr>
-        """
-
-    html = f"""
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <title>Resumen de Producción por Swab</title>
-        <style>
-            body {{
-                font-family: Arial, sans-serif;
-                margin: 28px;
-                color: #1f2937;
-            }}
-            h1 {{
-                color: #0f172a;
-            }}
-            h2 {{
-                color: #1e3a8a;
-                margin-top: 26px;
-            }}
-            table {{
-                border-collapse: collapse;
-                width: 100%;
-                margin-top: 10px;
-                font-size: 12px;
-            }}
-            th {{
-                background: #1e3a8a;
-                color: white;
-                padding: 7px;
-                border: 1px solid #d1d5db;
-            }}
-            td {{
-                padding: 6px;
-                border: 1px solid #d1d5db;
-            }}
-            .kpi {{
-                display: inline-block;
-                width: 23%;
-                background: #eff6ff;
-                border: 1px solid #bfdbfe;
-                padding: 12px;
-                margin: 4px;
-                border-radius: 8px;
-            }}
-            .kpi b {{
-                font-size: 18px;
-                color: #1e40af;
-            }}
-        </style>
-    </head>
-    <body>
-        <h1>Resumen de Producción por Swab</h1>
-
-        <p><b>Periodo analizado:</b> {fecha_inicio} al {fecha_fin}</p>
-        <p><b>Grupos seleccionados:</b> {grupos_txt}</p>
-        <p><b>Pozos:</b> {pozos_txt}</p>
-
-        <h2>Resumen general</h2>
-
-        <div class="kpi">
-            Producción total<br>
-            <b>{formato_numero(resumen_general['produccion_total'], 2)}</b>
-        </div>
-
-        <div class="kpi">
-            Intervenciones<br>
-            <b>{int(resumen_general['intervenciones_total'])}</b>
-        </div>
-
-        <div class="kpi">
-            Pozos activos<br>
-            <b>{int(resumen_general['pozos_activos'])}</b>
-        </div>
-
-        <div class="kpi">
-            Producción por intervención<br>
-            <b>{formato_numero(resumen_general['produccion_por_intervencion'], 2)}</b>
-        </div>
-
-        <h2>Resumen por pozo</h2>
-        <table>
-            <tr>
-                <th>Pozo</th>
-                <th>Grupo</th>
-                <th>Producción total</th>
-                <th>Intervenciones</th>
-                <th>Producción por intervención</th>
-                <th>Primera fecha</th>
-                <th>Última fecha</th>
-            </tr>
-            {filas_pozo}
-        </table>
-
-        <h2>Intervenciones por mes</h2>
-        <table>
-            <tr>
-                <th>Mes</th>
-                <th>Grupo</th>
-                <th>Intervenciones</th>
-                <th>Producción</th>
-            </tr>
-            {filas_mes}
-        </table>
-    </body>
-    </html>
-    """
-
-    return html
+def prepare_daily_data(
+    filtered: pd.DataFrame,
+    status_df: pd.DataFrame,
+    date_col: str,
+) -> pd.DataFrame:
+    temp = filtered.copy()
+    temp["Día"] = temp[date_col].dt.floor("D")
+    if status_df is not None and not status_df.empty:
+        status_map = status_df[["Pozo_norm", "Estado"]].drop_duplicates("Pozo_norm")
+        temp = temp.merge(status_map, on="Pozo_norm", how="left")
+        temp["Estado"] = temp["Estado"].fillna("Sin estado")
+    else:
+        temp["Estado"] = "Sin estado"
+    return temp
 
 
-with st.sidebar:
-    st.header("Archivo")
+def build_daily_summary(
+    daily_df: pd.DataFrame,
+    metric_col: str,
+    segment_col: str,
+) -> pd.DataFrame:
+    if daily_df.empty:
+        return pd.DataFrame()
 
-    archivo = st.file_uploader(
-        "Sube el Excel de Producción por Swab",
-        type=["xlsx", "xls"]
-    )
-
-
-if archivo is None:
-    st.info("Sube el archivo Excel para empezar.")
-    st.stop()
-
-
-bytes_excel = archivo.getvalue()
-buffer = BytesIO(bytes_excel)
-
-
-try:
-    pozos_2024 = obtener_pozos_convertidos(BytesIO(bytes_excel), "Swab 2024 (Dia)", 2024)
-    pozos_2025 = obtener_pozos_convertidos(BytesIO(bytes_excel), "Swab 2025 (Dia)", 2025)
-    pozos_2026 = obtener_pozos_convertidos(BytesIO(bytes_excel), "Swab 2026 (Dia)", 2026)
-
-    data = leer_datos_swab(BytesIO(bytes_excel))
-    data = clasificar_pozos(data, pozos_2024, pozos_2025, pozos_2026)
-
-except Exception as e:
-    st.error(f"No pude procesar el archivo: {e}")
-    st.stop()
-
-
-todos_los_pozos = sorted(data["pozo"].unique())
-
-mapa_grupos = {
-    "Convertidos 2024": pozos_2024,
-    "Convertidos 2025": pozos_2025,
-    "Convertidos 2026": pozos_2026,
-    "Producción básica": sorted(data.loc[data["grupo"] == "Producción básica", "pozo"].unique()),
-    "Todos": todos_los_pozos
-}
-
-
-st.sidebar.header("Filtros")
-
-fecha_min = data["fecha"].min().date()
-fecha_max = data["fecha"].max().date()
-
-rango_fechas = st.sidebar.date_input(
-    "Rango de fechas",
-    value=(fecha_min, fecha_max),
-    min_value=fecha_min,
-    max_value=fecha_max
-)
-
-if isinstance(rango_fechas, tuple) and len(rango_fechas) == 2:
-    fecha_inicio = pd.to_datetime(rango_fechas[0])
-    fecha_fin = pd.to_datetime(rango_fechas[1])
-else:
-    fecha_inicio = pd.to_datetime(fecha_min)
-    fecha_fin = pd.to_datetime(fecha_max)
-
-
-grupos_disponibles = [
-    "Convertidos 2024",
-    "Convertidos 2025",
-    "Convertidos 2026",
-    "Producción básica",
-    "Todos"
-]
-
-grupos_seleccionados = st.sidebar.multiselect(
-    "Tipo de pozos",
-    grupos_disponibles,
-    default=["Todos"]
-)
-
-if not grupos_seleccionados:
-    grupos_seleccionados = ["Todos"]
-
-
-if "Todos" in grupos_seleccionados:
-    pozos_base = todos_los_pozos
-    grupos_efectivos = ["Todos"]
-else:
-    pozos_base = []
-
-    for grupo in grupos_seleccionados:
-        pozos_base.extend(mapa_grupos.get(grupo, []))
-
-    pozos_base = sorted(list(dict.fromkeys(pozos_base)))
-    grupos_efectivos = grupos_seleccionados
-
-
-pozos_seleccionados = st.sidebar.multiselect(
-    "Pozos",
-    pozos_base,
-    default=pozos_base
-)
-
-if not pozos_seleccionados:
-    st.warning("Selecciona al menos un pozo.")
-    st.stop()
-
-
-data_filtrada = data[
-    (data["fecha"] >= fecha_inicio) &
-    (data["fecha"] <= fecha_fin) &
-    (data["pozo"].isin(pozos_seleccionados))
-].copy()
-
-
-if data_filtrada.empty:
-    st.warning("No hay datos para el rango de fechas y pozos seleccionados.")
-    st.stop()
-
-
-st.subheader("Resumen general del periodo")
-
-produccion_total = data_filtrada["produccion"].sum()
-intervenciones_total = data_filtrada["intervenciones"].sum()
-corridas_total = data_filtrada["corridas"].sum()
-pozos_activos = data_filtrada["pozo"].nunique()
-prod_por_interv = produccion_total / intervenciones_total if intervenciones_total > 0 else 0
-
-k1, k2, k3, k4, k5 = st.columns(5)
-
-k1.metric("Producción total", f"{produccion_total:,.2f}")
-k2.metric("Intervenciones", f"{intervenciones_total:,.0f}")
-k3.metric("Corridas", f"{corridas_total:,.0f}")
-k4.metric("Pozos activos", f"{pozos_activos:,.0f}")
-k5.metric("Prod. por intervención", f"{prod_por_interv:,.2f}")
-
-
-resumen_general = {
-    "produccion_total": produccion_total,
-    "intervenciones_total": intervenciones_total,
-    "corridas_total": corridas_total,
-    "pozos_activos": pozos_activos,
-    "produccion_por_intervencion": prod_por_interv
-}
-
-
-tab_resumen, tab_pozo, tab_mes, tab_detalle, tab_doc = st.tabs(
-    [
-        "Resumen por pozo",
-        "Producción por pozo",
-        "Intervenciones por mes",
-        "Detalle",
-        "Documento resumen"
-    ]
-)
-
-
-with tab_resumen:
-    st.subheader("Resumen por pozo")
-
-    resumen_pozo = (
-        data_filtrada
-        .groupby(["pozo", "grupo"], as_index=False)
-        .agg(
-            produccion_total=("produccion", "sum"),
-            agua_total=("agua", "sum"),
-            intervenciones_total=("intervenciones", "sum"),
-            corridas_total=("corridas", "sum"),
-            primera_fecha=("fecha", "min"),
-            ultima_fecha=("fecha", "max"),
-            dias_con_intervencion=("fecha", lambda x: x.dt.date.nunique())
+    if segment_col == "Total general":
+        grouped = (
+            daily_df.groupby("Día", dropna=False)
+            .agg(
+                Producción=(metric_col, "sum"),
+                Intervenciones=("Intervenciones_calc", "sum"),
+                Pozos_con_dato=("Pozo_norm", "nunique"),
+            )
+            .reset_index()
         )
-    )
+        grouped["Segmento"] = "Total general"
+        return grouped[["Día", "Segmento", "Producción", "Intervenciones", "Pozos_con_dato"]]
 
-    resumen_pozo["produccion_por_intervencion"] = np.where(
-        resumen_pozo["intervenciones_total"] > 0,
-        resumen_pozo["produccion_total"] / resumen_pozo["intervenciones_total"],
-        0
-    )
-
-    resumen_pozo = resumen_pozo.sort_values(
-        ["produccion_total", "intervenciones_total"],
-        ascending=[False, False]
-    )
-
-    st.dataframe(
-        resumen_pozo.round(3),
-        use_container_width=True
-    )
-
-    csv_resumen = resumen_pozo.to_csv(index=False).encode("utf-8")
-
-    st.download_button(
-        "Descargar resumen por pozo CSV",
-        data=csv_resumen,
-        file_name="resumen_por_pozo_swab.csv",
-        mime="text/csv"
-    )
-
-
-with tab_pozo:
-    st.subheader("Producción por pozo en el periodo")
-
-    prod_pozo = (
-        data_filtrada
-        .groupby("pozo", as_index=False)
-        .agg(produccion=("produccion", "sum"))
-        .sort_values("produccion", ascending=False)
-    )
-
-    fig_prod = px.bar(
-        prod_pozo.head(40),
-        x="pozo",
-        y="produccion",
-        title="Producción total por pozo",
-        labels={
-            "pozo": "Pozo",
-            "produccion": "Producción"
-        }
-    )
-
-    fig_prod.update_layout(
-        xaxis_tickangle=-45,
-        height=520
-    )
-
-    st.plotly_chart(fig_prod, use_container_width=True)
-
-    st.subheader("Producción diaria por pozo seleccionado")
-
-    prod_diaria = (
-        data_filtrada
-        .groupby(["fecha", "pozo"], as_index=False)
-        .agg(produccion=("produccion", "sum"))
-    )
-
-    fig_linea = px.line(
-        prod_diaria,
-        x="fecha",
-        y="produccion",
-        color="pozo",
-        title="Producción diaria por pozo",
-        labels={
-            "fecha": "Fecha",
-            "produccion": "Producción",
-            "pozo": "Pozo"
-        }
-    )
-
-    fig_linea.update_layout(height=560)
-
-    st.plotly_chart(fig_linea, use_container_width=True)
-
-
-with tab_mes:
-    st.subheader("Intervenciones por mes")
-
-    interv_mes = (
-        data_filtrada
-        .groupby(["mes", "grupo"], as_index=False)
+    grouped = (
+        daily_df.groupby(["Día", segment_col], dropna=False)
         .agg(
-            intervenciones=("intervenciones", "sum"),
-            produccion=("produccion", "sum"),
-            pozos=("pozo", "nunique")
+            Producción=(metric_col, "sum"),
+            Intervenciones=("Intervenciones_calc", "sum"),
+            Pozos_con_dato=("Pozo_norm", "nunique"),
         )
+        .reset_index()
+        .rename(columns={segment_col: "Segmento"})
     )
+    grouped["Segmento"] = grouped["Segmento"].astype(str)
+    return grouped[["Día", "Segmento", "Producción", "Intervenciones", "Pozos_con_dato"]]
 
-    fig_interv = px.bar(
-        interv_mes,
-        x="mes",
-        y="intervenciones",
-        color="grupo",
-        barmode="group",
-        title="Intervenciones por mes y grupo",
-        labels={
-            "mes": "Mes",
-            "intervenciones": "Intervenciones",
-            "grupo": "Grupo"
-        }
+
+def top_segments_by_total(daily_summary: pd.DataFrame, top_n: int) -> List[str]:
+    if daily_summary.empty or "Segmento" not in daily_summary.columns:
+        return []
+    totals = (
+        daily_summary.groupby("Segmento", dropna=False)["Producción"]
+        .sum()
+        .sort_values(ascending=False)
+        .head(top_n)
     )
+    return list(totals.index.astype(str))
 
-    fig_interv.update_layout(height=540)
 
-    st.plotly_chart(fig_interv, use_container_width=True)
-
-    st.dataframe(
-        interv_mes.round(3),
-        use_container_width=True
+def make_daily_heatmap(
+    daily_df: pd.DataFrame,
+    date_col: str,
+    pozo_col: str,
+    metric_col: str,
+    top_n_heatmap: int,
+) -> pd.DataFrame:
+    if daily_df.empty:
+        return pd.DataFrame()
+    well_totals = (
+        daily_df.groupby(pozo_col, dropna=False)[metric_col]
+        .sum()
+        .sort_values(ascending=False)
+        .head(top_n_heatmap)
     )
-
-    st.subheader("Intervenciones mensuales por pozo")
-
-    interv_mes_pozo = (
-        data_filtrada
-        .groupby(["mes", "pozo", "grupo"], as_index=False)
-        .agg(
-            intervenciones=("intervenciones", "sum"),
-            produccion=("produccion", "sum"),
-            corridas=("corridas", "sum")
-        )
+    wells = list(well_totals.index.astype(str))
+    temp = daily_df[daily_df[pozo_col].astype(str).isin(wells)].copy()
+    temp["Día"] = temp[date_col].dt.floor("D")
+    pivot = (
+        temp.pivot_table(index=pozo_col, columns="Día", values=metric_col, aggfunc="sum", fill_value=0)
+        .reindex(wells)
     )
-
-    st.dataframe(
-        interv_mes_pozo.round(3),
-        use_container_width=True
-    )
-
-    csv_interv = interv_mes_pozo.to_csv(index=False).encode("utf-8")
-
-    st.download_button(
-        "Descargar intervenciones mensuales por pozo CSV",
-        data=csv_interv,
-        file_name="intervenciones_mensuales_por_pozo.csv",
-        mime="text/csv"
-    )
+    return pivot
 
 
-with tab_detalle:
-    st.subheader("Detalle de registros filtrados")
-
-    columnas_detalle = [
-        "fecha",
-        "mes",
-        "pozo",
-        "grupo",
-        "bateria",
-        "unidad",
-        "produccion",
-        "agua",
-        "intervenciones",
-        "corridas"
-    ]
-
-    st.dataframe(
-        data_filtrada[columnas_detalle].sort_values(["fecha", "pozo"]),
-        use_container_width=True
-    )
-
-    csv_detalle = data_filtrada[columnas_detalle].to_csv(index=False).encode("utf-8")
-
-    st.download_button(
-        "Descargar detalle filtrado CSV",
-        data=csv_detalle,
-        file_name="detalle_swab_filtrado.csv",
-        mime="text/csv"
-    )
+def make_excel_report(
+    filtered: pd.DataFrame,
+    status_df: pd.DataFrame,
+    summary_well: pd.DataFrame,
+    summary_month_well: pd.DataFrame,
+    monthly_drop: pd.DataFrame,
+    daily_summary: pd.DataFrame,
+) -> bytes:
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        filtered.to_excel(writer, index=False, sheet_name="Datos filtrados")
+        status_df.to_excel(writer, index=False, sheet_name="Activos inactivos")
+        summary_well.to_excel(writer, index=False, sheet_name="Resumen pozo")
+        summary_month_well.to_excel(writer, index=False, sheet_name="Mensual pozo")
+        if monthly_drop is not None and not monthly_drop.empty:
+            monthly_drop.to_excel(writer, index=False, sheet_name="Caida mensual")
+        if daily_summary is not None and not daily_summary.empty:
+            daily_summary.to_excel(writer, index=False, sheet_name="Produccion diaria")
+    return output.getvalue()
 
 
-with tab_doc:
-    st.subheader("Documento resumen descargable")
+# ============================================================
+# Interfaz principal
+# ============================================================
 
-    resumen_pozo_doc = (
-        data_filtrada
-        .groupby(["pozo", "grupo"], as_index=False)
-        .agg(
-            produccion_total=("produccion", "sum"),
-            intervenciones_total=("intervenciones", "sum"),
-            primera_fecha=("fecha", "min"),
-            ultima_fecha=("fecha", "max")
-        )
-    )
+st.title("🛢️ Análisis SWAB en Streamlit")
+st.caption("Carga tu Excel o CSV, selecciona los pozos y ejecuta el análisis.")
 
-    resumen_pozo_doc["produccion_por_intervencion"] = np.where(
-        resumen_pozo_doc["intervenciones_total"] > 0,
-        resumen_pozo_doc["produccion_total"] / resumen_pozo_doc["intervenciones_total"],
-        0
-    )
-
-    resumen_pozo_doc = resumen_pozo_doc.sort_values(
-        "produccion_total",
-        ascending=False
-    )
-
-    interv_mes_doc = (
-        data_filtrada
-        .groupby(["mes", "grupo"], as_index=False)
-        .agg(
-            intervenciones=("intervenciones", "sum"),
-            produccion=("produccion", "sum")
-        )
-    )
-
-    html = generar_documento_html(
-        fecha_inicio.date(),
-        fecha_fin.date(),
-        grupos_efectivos,
-        pozos_seleccionados,
-        resumen_general,
-        resumen_pozo_doc,
-        interv_mes_doc
-    )
-
+with st.expander("Qué hace esta versión", expanded=True):
     st.markdown(
         """
-        Este documento resume el periodo seleccionado, los grupos elegidos,
-        la producción total, las intervenciones, el ranking por pozo y las intervenciones por mes.
+Esta versión permite cargar el archivo, escoger los grupos de pozos convertidos 2024, 2025, 2026 o producción básica, seleccionar pozos específicos y recién ejecutar el análisis.
+
+El estado activo o inactivo se calcula por mes calendario. Es decir, si seleccionas mayo, el corte será del 01 de mayo al último día de mayo. No usa 30 días hacia atrás.
+
+Criterio usado: si el pozo no produjo en el mes calendario seleccionado, queda como inactivo. La variable para definir producción la puedes escoger en el panel lateral.
+
+Además, al ejecutar el análisis se abre primero una vista de producción diaria SWAB de todos los pozos seleccionados. Esa vista puede segmentarse por batería, grupo de conversión, pozo o estado activo/inactivo.
         """
     )
 
-    st.download_button(
-        "Descargar documento resumen HTML",
-        data=html.encode("utf-8"),
-        file_name="resumen_produccion_swab.html",
-        mime="text/html"
+uploaded_file = st.sidebar.file_uploader(
+    "Carga archivo SWAB",
+    type=["xlsx", "xls", "csv"],
+)
+
+if uploaded_file is None:
+    st.info("Carga un archivo .xlsx, .xls o .csv para iniciar.")
+    st.stop()
+
+sheets, default_sheet = read_uploaded_file(uploaded_file)
+
+if not sheets:
+    st.error("No se pudo leer información válida del archivo.")
+    st.stop()
+
+sheet_names = list(sheets.keys())
+
+st.sidebar.header("Hojas del archivo")
+main_sheet = st.sidebar.selectbox(
+    "Hoja principal de producción",
+    sheet_names,
+    index=default_index(sheet_names, default_sheet),
+)
+
+raw_df = sheets[main_sheet].copy()
+raw_df.columns = [str(c).strip() for c in raw_df.columns]
+columns = list(raw_df.columns)
+
+if raw_df.empty:
+    st.error("La hoja seleccionada está vacía.")
+    st.stop()
+
+# Detección automática de columnas principales
+fecha_auto = find_column(columns, ["fecha", "date", "dia", "día", "periodo", "fecha produccion", "fecha swab"])
+pozo_auto = find_column(columns, ["pozo", "well", "nombre pozo", "codigo pozo", "id pozo"])
+bateria_auto = find_column(columns, ["bateria", "batería", "battery", "estacion", "estación", "planta"])
+gas_auto = find_column(columns, ["gas", "qgas", "q gas", "gas mscf", "gas mpcd", "gas mmscf", "produccion gas", "producción gas", "prod gas"])
+petroleo_auto = find_column(columns, ["prcr", "petroleo", "petróleo", "oil", "condensado", "cond", "bopd", "bls petroleo", "bls petróleo", "prod petroleo", "produccion"])
+agua_auto = find_column(columns, ["agua", "water", "bwpd", "bls agua", "agua bbl"])
+interv_auto = find_column(columns, ["intervencion", "intervención", "intervenciones", "swab", "servicio", "evento", "trabajo"])
+year_auto = find_column(columns, ["anio conversion", "año conversion", "year conversion", "conversion", "convertido"])
+
+st.sidebar.header("Mapeo de columnas")
+options_required = columns
+options_optional = ["No aplica"] + columns
+
+fecha_col = st.sidebar.selectbox("Columna fecha", options_required, index=default_index(options_required, fecha_auto))
+pozo_col = st.sidebar.selectbox("Columna pozo", options_required, index=default_index(options_required, pozo_auto))
+bateria_col = st.sidebar.selectbox("Columna batería", options_optional, index=default_index(options_optional, bateria_auto))
+gas_col = st.sidebar.selectbox("Columna gas", options_optional, index=default_index(options_optional, gas_auto))
+petroleo_col = st.sidebar.selectbox("Columna petróleo, condensado o PRCR", options_optional, index=default_index(options_optional, petroleo_auto))
+agua_col = st.sidebar.selectbox("Columna agua", options_optional, index=default_index(options_optional, agua_auto))
+interv_col = st.sidebar.selectbox("Columna intervenciones", options_optional, index=default_index(options_optional, interv_auto))
+year_col = st.sidebar.selectbox("Columna año de conversión real", options_optional, index=default_index(options_optional, year_auto))
+
+# Detección de listas de pozos convertidos desde hojas del Excel
+st.sidebar.header("Listas de pozos por grupo")
+st.sidebar.caption("La app intenta leer automáticamente las hojas de convertidos. También puedes pegarlos manualmente.")
+
+sheet_options = ["No usar hoja"] + sheet_names
+sheet_2024 = st.sidebar.selectbox(
+    "Hoja pozos convertidos 2024",
+    sheet_options,
+    index=default_index(sheet_options, pick_default_conversion_sheet(sheet_names, 2024)),
+)
+sheet_2025 = st.sidebar.selectbox(
+    "Hoja pozos convertidos 2025",
+    sheet_options,
+    index=default_index(sheet_options, pick_default_conversion_sheet(sheet_names, 2025)),
+)
+sheet_2026 = st.sidebar.selectbox(
+    "Hoja pozos convertidos 2026",
+    sheet_options,
+    index=default_index(sheet_options, pick_default_conversion_sheet(sheet_names, 2026)),
+)
+sheet_basic = st.sidebar.selectbox(
+    "Hoja padrón producción básica",
+    sheet_options,
+    index=default_index(sheet_options, pick_default_basic_sheet(sheet_names)),
+)
+
+wells_2024_auto = extract_wells_from_sheet(sheets.get(sheet_2024)) if sheet_2024 != "No usar hoja" else set()
+wells_2025_auto = extract_wells_from_sheet(sheets.get(sheet_2025)) if sheet_2025 != "No usar hoja" else set()
+wells_2026_auto = extract_wells_from_sheet(sheets.get(sheet_2026)) if sheet_2026 != "No usar hoja" else set()
+wells_basic_auto = extract_wells_from_sheet(sheets.get(sheet_basic)) if sheet_basic != "No usar hoja" else set()
+
+with st.sidebar.expander("Pegar pozos manualmente"):
+    manual_2024 = st.text_area("Pozos convertidos 2024", value="", height=90)
+    manual_2025 = st.text_area("Pozos convertidos 2025", value="", height=90)
+    manual_2026 = st.text_area("Pozos convertidos 2026", value="", height=90)
+
+wells_2024 = wells_2024_auto.union(split_wells(manual_2024))
+wells_2025 = wells_2025_auto.union(split_wells(manual_2025))
+wells_2026 = wells_2026_auto.union(split_wells(manual_2026))
+converted_all = wells_2024.union(wells_2025).union(wells_2026)
+
+# Preparación de datos
+df = raw_df.copy()
+df[fecha_col] = to_datetime_safe(df[fecha_col])
+df = df[df[fecha_col].notna()].copy()
+
+if df.empty:
+    st.error("No se encontraron fechas válidas. Revisa la columna fecha.")
+    st.stop()
+
+for col in [gas_col, petroleo_col, agua_col, interv_col]:
+    if col and col != "No aplica":
+        df[col] = to_numeric_safe(df[col])
+
+if bateria_col == "No aplica":
+    df["Batería"] = "Sin batería"
+    bateria_use = "Batería"
+else:
+    bateria_use = bateria_col
+    df[bateria_use] = df[bateria_use].astype(str).replace("nan", "Sin batería").fillna("Sin batería")
+
+df[pozo_col] = df[pozo_col].astype(str).str.strip()
+df["Pozo_norm"] = df[pozo_col].map(normalize_well)
+df = df[df["Pozo_norm"] != ""].copy()
+
+use_year_col = year_col != "No aplica"
+df["Grupo conversión"] = df.apply(
+    lambda row: build_group_for_well(
+        row[pozo_col],
+        row.get(year_col) if use_year_col else None,
+        use_year_col,
+        wells_2024,
+        wells_2025,
+        wells_2026,
+    ),
+    axis=1,
+)
+
+# Si existe padrón básico, conserva esos pozos como universo básico aunque no estén en la hoja principal.
+# La producción básica dentro del análisis se mantiene como todo lo no convertido.
+
+st.sidebar.header("Criterios")
+each_row_is_intervention = st.sidebar.checkbox("Cada fila representa una intervención", value=True)
+resample_monthly = st.sidebar.checkbox("Graficar detalle por pozo en mensual", value=True)
+top_n = st.sidebar.slider("Top de caídas a mostrar", min_value=5, max_value=50, value=15, step=1)
+
+if each_row_is_intervention:
+    df["Intervenciones_calc"] = 1
+else:
+    if interv_col and interv_col != "No aplica":
+        df["Intervenciones_calc"] = df[interv_col].fillna(0)
+    else:
+        df["Intervenciones_calc"] = 1
+
+# Variables numéricas disponibles
+production_candidates = []
+if gas_col != "No aplica":
+    production_candidates.append(gas_col)
+if petroleo_col != "No aplica":
+    production_candidates.append(petroleo_col)
+if agua_col != "No aplica":
+    production_candidates.append(agua_col)
+if not production_candidates:
+    production_candidates = ["Intervenciones_calc"]
+
+status_value_col = st.sidebar.selectbox(
+    "Variable para definir activo/inactivo",
+    production_candidates,
+    index=0,
+    help="Si la suma de esta variable en el mes calendario elegido es mayor que cero, el pozo queda activo.",
+)
+
+# Filtros principales
+st.sidebar.header("Filtros")
+min_date = df[fecha_col].min().date()
+max_date = df[fecha_col].max().date()
+date_range = st.sidebar.date_input("Rango de fecha para gráficas", value=(min_date, max_date), min_value=min_date, max_value=max_date)
+
+if isinstance(date_range, tuple) and len(date_range) == 2:
+    start_date, end_date = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
+else:
+    start_date, end_date = pd.to_datetime(min_date), pd.to_datetime(max_date)
+
+baterias = sorted(df[bateria_use].dropna().astype(str).unique())
+selected_baterias = st.sidebar.multiselect("Baterías", baterias, default=baterias)
+
+group_order = ["Convertidos 2024", "Convertidos 2025", "Convertidos 2026", "Producción básica"]
+available_groups = [g for g in group_order if g in df["Grupo conversión"].unique()]
+if not available_groups:
+    available_groups = ["Producción básica"]
+selected_groups = st.sidebar.multiselect("Grupo de pozos", available_groups, default=available_groups)
+
+# Universo de pozos según grupo y batería, pero sin aplicar rango de fecha para que no se pierdan los inactivos.
+df_scope_no_date = df[
+    (df[bateria_use].astype(str).isin(selected_baterias))
+    & (df["Grupo conversión"].isin(selected_groups))
+].copy()
+
+pozos_by_group = {
+    group: sorted(df_scope_no_date.loc[df_scope_no_date["Grupo conversión"] == group, pozo_col].astype(str).unique())
+    for group in selected_groups
+}
+
+st.sidebar.markdown("### Selección de pozos")
+with st.sidebar.expander("Ver cantidad por grupo", expanded=True):
+    for group in selected_groups:
+        st.write(f"{group}: {len(pozos_by_group.get(group, []))} pozos")
+
+pozos_all = sorted(df_scope_no_date[pozo_col].dropna().astype(str).unique())
+selected_pozos = st.sidebar.multiselect("Pozos a analizar", pozos_all, default=pozos_all)
+
+available_months = sorted(df[fecha_col].dt.to_period("M").dt.to_timestamp().unique())
+month_labels = [pd.Timestamp(m).strftime("%Y-%m") for m in available_months]
+default_month_label = pd.Timestamp(available_months[-1]).strftime("%Y-%m") if available_months else ""
+month_label = st.sidebar.selectbox(
+    "Mes calendario para estado activo/inactivo",
+    month_labels,
+    index=month_labels.index(default_month_label) if default_month_label in month_labels else 0,
+)
+selected_month = pd.to_datetime(month_label + "-01")
+
+run_analysis = st.sidebar.button("Ejecutar análisis", type="primary", use_container_width=True)
+
+if not run_analysis:
+    st.info("Carga el archivo, selecciona grupos y pozos en el panel lateral, luego presiona **Ejecutar análisis**.")
+
+    st.subheader("Listas detectadas")
+    col_a, col_b, col_c, col_d = st.columns(4)
+    col_a.metric("Convertidos 2024", len(wells_2024))
+    col_b.metric("Convertidos 2025", len(wells_2025))
+    col_c.metric("Convertidos 2026", len(wells_2026))
+    col_d.metric("Básica detectada", len(wells_basic_auto))
+
+    with st.expander("Ver pozos detectados por grupo"):
+        for title, wells in {
+            "Convertidos 2024": wells_2024,
+            "Convertidos 2025": wells_2025,
+            "Convertidos 2026": wells_2026,
+            "Padrón producción básica": wells_basic_auto,
+        }.items():
+            st.markdown(f"**{title}**")
+            st.write(", ".join(sorted(wells)) if wells else "Sin lista detectada")
+    st.stop()
+
+# Aplicar filtros finales
+filtered_no_date = df_scope_no_date[df_scope_no_date[pozo_col].astype(str).isin(selected_pozos)].copy()
+filtered = filtered_no_date[(filtered_no_date[fecha_col] >= start_date) & (filtered_no_date[fecha_col] <= end_date)].copy()
+
+if filtered.empty:
+    st.warning("No hay datos con los filtros seleccionados para el rango de fecha de gráficas.")
+    st.stop()
+
+# Estado activo e inactivo con mes calendario
+status_df = build_active_inactive_table(
+    df_scope=filtered_no_date,
+    selected_wells=selected_pozos,
+    date_col=fecha_col,
+    well_col=pozo_col,
+    battery_col=bateria_use,
+    status_value_col=status_value_col,
+    month_start_selected=selected_month,
+)
+
+# KPIs
+st.subheader("Resumen general")
+active_count = int((status_df["Estado"] == "Activo").sum()) if not status_df.empty else 0
+inactive_count = int((status_df["Estado"] == "Inactivo").sum()) if not status_df.empty else 0
+
+kpi_cols = st.columns(6)
+kpi_cols[0].metric("Pozos seleccionados", f"{len(selected_pozos)}")
+kpi_cols[1].metric("Pozos activos", f"{active_count}")
+kpi_cols[2].metric("Pozos inactivos", f"{inactive_count}")
+kpi_cols[3].metric("Baterías", f"{filtered[bateria_use].nunique()}")
+kpi_cols[4].metric("Intervenciones", format_number(filtered["Intervenciones_calc"].sum(), 0))
+kpi_cols[5].metric(f"Producción total {status_value_col}", format_number(filtered[status_value_col].sum(), 2))
+
+st.caption(
+    f"Estado activo/inactivo evaluado con corte mensual {selected_month.strftime('%Y-%m')}: "
+    f"desde {month_limits(selected_month)[0].date()} hasta {month_limits(selected_month)[1].date()}."
+)
+
+# Tabs principales
+daily_summary_for_report = pd.DataFrame()
+
+tab_diario, tab_estado, tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "Producción diaria SWAB",
+    "Activos e inactivos",
+    "Producción mensual",
+    "Intervenciones",
+    "Caídas",
+    "Detalle por pozo",
+    "Tablas y descarga",
+])
+
+with tab_diario:
+    st.subheader("Producción diaria SWAB de los pozos seleccionados")
+    st.caption("Esta vista toma todos los pozos seleccionados en el panel lateral y permite segmentar la producción diaria.")
+
+    daily_metric = st.selectbox(
+        "Variable diaria a analizar",
+        production_candidates,
+        index=0,
+        key="daily_metric",
     )
 
-    st.components.v1.html(html, height=700, scrolling=True)
+    segment_options = [
+        "Total general",
+        bateria_use,
+        "Grupo conversión",
+        pozo_col,
+        "Estado",
+    ]
+    segment_options = list(dict.fromkeys(segment_options))
+
+    cseg1, cseg2, cseg3 = st.columns([1.2, 1, 1])
+    segment_choice = cseg1.selectbox(
+        "Segmentar por",
+        segment_options,
+        index=0,
+        key="daily_segment",
+    )
+    chart_kind = cseg2.selectbox(
+        "Tipo de gráfica",
+        ["Barras", "Línea"],
+        index=0,
+        key="daily_chart_kind",
+    )
+    top_daily_segments = cseg3.slider(
+        "Top segmentos",
+        min_value=5,
+        max_value=50,
+        value=15,
+        step=1,
+        key="top_daily_segments",
+    )
+
+    daily_df = prepare_daily_data(filtered, status_df, fecha_col)
+    daily_summary = build_daily_summary(daily_df, daily_metric, segment_choice)
+    daily_summary_for_report = daily_summary.copy()
+
+    if daily_summary.empty:
+        st.warning("No hay información diaria con los filtros seleccionados.")
+    else:
+        total_daily_prod = daily_summary["Producción"].sum()
+        days_with_activity = int((daily_summary.groupby("Día")["Producción"].sum() > 0).sum())
+        avg_daily_prod = daily_summary.groupby("Día")["Producción"].sum().mean()
+        wells_with_activity = int(daily_df.loc[daily_df[daily_metric] > 0, "Pozo_norm"].nunique())
+
+        kd1, kd2, kd3, kd4 = st.columns(4)
+        kd1.metric(f"Total {daily_metric}", format_number(total_daily_prod, 2))
+        kd2.metric("Días con producción", f"{days_with_activity}")
+        kd3.metric("Promedio diario", format_number(avg_daily_prod, 2))
+        kd4.metric("Pozos con producción", f"{wells_with_activity}")
+
+        plot_daily = daily_summary.copy()
+        if segment_choice != "Total general":
+            top_segments = top_segments_by_total(plot_daily, top_daily_segments)
+            plot_daily = plot_daily[plot_daily["Segmento"].astype(str).isin(top_segments)].copy()
+            st.caption(f"Se muestran los {len(top_segments)} segmentos con mayor producción acumulada para mantener la gráfica legible.")
+
+        if chart_kind == "Barras":
+            fig_daily = px.bar(
+                plot_daily,
+                x="Día",
+                y="Producción",
+                color="Segmento" if segment_choice != "Total general" else None,
+                title=f"Producción diaria SWAB por {segment_choice}",
+                hover_data=["Intervenciones", "Pozos_con_dato"],
+            )
+        else:
+            fig_daily = px.line(
+                plot_daily,
+                x="Día",
+                y="Producción",
+                color="Segmento" if segment_choice != "Total general" else None,
+                markers=True,
+                title=f"Producción diaria SWAB por {segment_choice}",
+                hover_data=["Intervenciones", "Pozos_con_dato"],
+            )
+
+        fig_daily.update_layout(
+            height=540,
+            xaxis_title="Día",
+            yaxis_title=daily_metric,
+            legend_title_text=segment_choice,
+            hovermode="x unified",
+        )
+        st.plotly_chart(fig_daily, use_container_width=True)
+
+        show_ma = st.checkbox("Mostrar promedio móvil de 7 días del total diario", value=True)
+        if show_ma:
+            total_by_day = (
+                daily_summary.groupby("Día", dropna=False)["Producción"]
+                .sum()
+                .reset_index()
+                .sort_values("Día")
+            )
+            total_by_day["Promedio móvil 7 días"] = total_by_day["Producción"].rolling(7, min_periods=1).mean()
+            fig_ma = go.Figure()
+            fig_ma.add_trace(go.Bar(x=total_by_day["Día"], y=total_by_day["Producción"], name="Producción diaria"))
+            fig_ma.add_trace(go.Scatter(x=total_by_day["Día"], y=total_by_day["Promedio móvil 7 días"], mode="lines", name="Promedio móvil 7 días"))
+            fig_ma.update_layout(
+                title="Producción diaria total y tendencia de 7 días",
+                height=430,
+                xaxis_title="Día",
+                yaxis_title=daily_metric,
+                hovermode="x unified",
+            )
+            st.plotly_chart(fig_ma, use_container_width=True)
+
+        if st.checkbox("Mostrar mapa diario por pozo", value=False):
+            top_heatmap = st.slider("Cantidad de pozos en el mapa", 5, 40, 20, key="top_heatmap")
+            pivot = make_daily_heatmap(daily_df, fecha_col, pozo_col, daily_metric, top_heatmap)
+            if pivot.empty:
+                st.info("No hay datos para el mapa diario por pozo.")
+            else:
+                fig_heat = px.imshow(
+                    pivot,
+                    aspect="auto",
+                    labels=dict(x="Día", y="Pozo", color=daily_metric),
+                    title=f"Mapa de producción diaria por pozo, top {top_heatmap}",
+                )
+                fig_heat.update_layout(height=max(420, 24 * len(pivot.index)))
+                st.plotly_chart(fig_heat, use_container_width=True)
+
+        st.markdown("### Tabla diaria segmentada")
+        st.dataframe(daily_summary, use_container_width=True)
+
+        csv_daily = daily_summary.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "Descargar producción diaria CSV",
+            data=csv_daily,
+            file_name="swab_produccion_diaria.csv",
+            mime="text/csv",
+        )
+
+with tab_estado:
+    st.subheader("Listado de pozos activos e inactivos")
+    st.markdown(
+        f"Criterio: pozo **activo** si la suma de **{status_value_col}** en el mes **{selected_month.strftime('%Y-%m')}** es mayor que cero."
+    )
+
+    if status_df.empty:
+        st.warning("No se pudo generar la tabla de estado.")
+    else:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Activos", active_count)
+        c2.metric("Inactivos", inactive_count)
+        pct_inactive = inactive_count / max(active_count + inactive_count, 1) * 100
+        c3.metric("Inactivos %", f"{pct_inactive:.1f}%")
+
+        fig_status = px.pie(
+            status_df,
+            names="Estado",
+            title="Distribución de pozos activos e inactivos",
+        )
+        st.plotly_chart(fig_status, use_container_width=True)
+
+        status_filter = st.multiselect(
+            "Filtrar estado",
+            ["Activo", "Inactivo"],
+            default=["Activo", "Inactivo"],
+            key="status_filter_main",
+        )
+        status_view = status_df[status_df["Estado"].isin(status_filter)].copy()
+        st.dataframe(status_view, use_container_width=True)
+
+        csv_status = status_view.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "Descargar activos e inactivos CSV",
+            data=csv_status,
+            file_name="swab_activos_inactivos.csv",
+            mime="text/csv",
+        )
+
+with tab1:
+    st.subheader("Producción mensual por batería y grupo")
+    monthly = get_monthly(filtered, fecha_col)
+
+    numeric_cols = []
+    if gas_col != "No aplica":
+        numeric_cols.append(gas_col)
+    if petroleo_col != "No aplica":
+        numeric_cols.append(petroleo_col)
+    if agua_col != "No aplica":
+        numeric_cols.append(agua_col)
+
+    if not numeric_cols:
+        st.warning("No hay columnas de producción seleccionadas.")
+    else:
+        metric_choice = st.selectbox("Variable a graficar", numeric_cols, key="metric_monthly")
+        grouped_month = (
+            monthly.groupby(["Mes", bateria_use, "Grupo conversión"], dropna=False)[metric_choice]
+            .sum()
+            .reset_index()
+        )
+
+        fig = px.bar(
+            grouped_month,
+            x="Mes",
+            y=metric_choice,
+            color=bateria_use,
+            facet_col="Grupo conversión" if grouped_month["Grupo conversión"].nunique() <= 4 else None,
+            title=f"{metric_choice} mensual por batería",
+        )
+        fig.update_layout(height=540, legend_title_text="Batería")
+        st.plotly_chart(fig, use_container_width=True)
+
+        avg_month = grouped_month.groupby("Mes", dropna=False)[metric_choice].mean().reset_index(name="Promedio mensual")
+        fig_avg = px.line(
+            avg_month,
+            x="Mes",
+            y="Promedio mensual",
+            markers=True,
+            title=f"Promedio mensual de {metric_choice}",
+        )
+        fig_avg.update_layout(height=420)
+        st.plotly_chart(fig_avg, use_container_width=True)
+
+with tab2:
+    st.subheader("Intervenciones por mes")
+    monthly = get_monthly(filtered, fecha_col)
+    interv_month = (
+        monthly.groupby(["Mes", bateria_use], dropna=False)["Intervenciones_calc"]
+        .sum()
+        .reset_index()
+    )
+
+    fig_int = px.bar(
+        interv_month,
+        x="Mes",
+        y="Intervenciones_calc",
+        color=bateria_use,
+        title="Cantidad de intervenciones por mes y batería",
+    )
+    fig_int.update_layout(height=500, yaxis_title="Intervenciones")
+    st.plotly_chart(fig_int, use_container_width=True)
+
+    interv_well = (
+        monthly.groupby(["Mes", bateria_use, pozo_col, "Grupo conversión"], dropna=False)["Intervenciones_calc"]
+        .sum()
+        .reset_index()
+        .sort_values(["Mes", bateria_use, "Intervenciones_calc"], ascending=[True, True, False])
+    )
+    st.dataframe(interv_well, use_container_width=True)
+
+with tab3:
+    st.subheader("Caídas de producción")
+
+    drop_metric = st.selectbox("Variable para caídas", production_candidates, index=0, key="drop_metric")
+
+    st.markdown("### Caída por mes calendario")
+    monthly_drop = period_drop_by_well_calendar_month(
+        filtered_no_date,
+        fecha_col,
+        pozo_col,
+        drop_metric,
+        bateria_use,
+        selected_month,
+    )
+
+    if monthly_drop.empty:
+        st.info("No hay datos suficientes para calcular caída mensual.")
+    else:
+        display_drop = monthly_drop.head(top_n).copy()
+        st.dataframe(display_drop, use_container_width=True)
+        fig_drop_month = px.bar(
+            display_drop,
+            x=pozo_col,
+            y="Caída producción",
+            color="Clasificación",
+            hover_data=[bateria_use, "Grupo conversión", "Producción mes anterior", "Producción mes de corte", "Caída %"],
+            title=f"Top {top_n} caídas, mes {selected_month.strftime('%Y-%m')} vs mes anterior",
+        )
+        fig_drop_month.update_layout(height=460, xaxis_title="Pozo", yaxis_title="Caída")
+        st.plotly_chart(fig_drop_month, use_container_width=True)
+
+    st.markdown("### Caídas por ventanas móviles")
+    st.caption("Esta parte sí usa 7, 30 y 365 días hacia atrás. El estado activo/inactivo usa mes calendario.")
+    for title, days in {"Últimos 7 días": 7, "Últimos 30 días": 30, "Últimos 365 días": 365}.items():
+        with st.expander(title, expanded=False):
+            drop_df = period_drop_by_well_days(filtered, fecha_col, pozo_col, drop_metric, bateria_use, days)
+            if drop_df.empty:
+                st.info("No hay datos suficientes para este cálculo.")
+                continue
+            st.dataframe(drop_df.head(top_n), use_container_width=True)
+
+with tab4:
+    st.subheader("Detalle por pozo")
+    selected_well_detail = st.selectbox("Selecciona pozo para detalle", sorted(filtered[pozo_col].astype(str).unique()))
+    well_df = filtered[filtered[pozo_col].astype(str) == str(selected_well_detail)].copy()
+    well_df = well_df.sort_values(fecha_col)
+
+    if resample_monthly:
+        well_df["Mes"] = well_df[fecha_col].dt.to_period("M").dt.to_timestamp()
+        agg_dict = {"Intervenciones_calc": "sum"}
+        for col in production_candidates:
+            if col != "Intervenciones_calc":
+                agg_dict[col] = "sum"
+        plot_df = well_df.groupby("Mes", dropna=False).agg(agg_dict).reset_index()
+        x_col = "Mes"
+    else:
+        agg_dict = {"Intervenciones_calc": "sum"}
+        for col in production_candidates:
+            if col != "Intervenciones_calc":
+                agg_dict[col] = "sum"
+        plot_df = well_df.groupby(fecha_col, dropna=False).agg(agg_dict).reset_index()
+        x_col = fecha_col
+
+    fig_detail = make_subplots(specs=[[{"secondary_y": True}]])
+
+    for col in production_candidates:
+        if col == "Intervenciones_calc":
+            continue
+        fig_detail.add_trace(
+            go.Scatter(x=plot_df[x_col], y=plot_df[col], mode="lines+markers", name=col),
+            secondary_y=False,
+        )
+
+    fig_detail.add_trace(
+        go.Bar(x=plot_df[x_col], y=plot_df["Intervenciones_calc"], name="Intervenciones", opacity=0.35),
+        secondary_y=True,
+    )
+
+    fig_detail.update_layout(
+        title=f"Producción e intervenciones del pozo {selected_well_detail}",
+        height=540,
+        hovermode="x unified",
+    )
+    fig_detail.update_yaxes(title_text="Producción", secondary_y=False)
+    fig_detail.update_yaxes(title_text="Intervenciones", secondary_y=True)
+    st.plotly_chart(fig_detail, use_container_width=True)
+
+    st.dataframe(well_df, use_container_width=True)
+
+with tab5:
+    st.subheader("Tablas consolidadas y descarga")
+    monthly = get_monthly(filtered, fecha_col)
+
+    agg_dict = {"Intervenciones_calc": "sum"}
+    for col in production_candidates:
+        if col != "Intervenciones_calc":
+            agg_dict[col] = "sum"
+
+    summary_well = (
+        monthly.groupby([bateria_use, pozo_col, "Grupo conversión"], dropna=False)
+        .agg(agg_dict)
+        .reset_index()
+        .sort_values("Intervenciones_calc", ascending=False)
+    )
+    st.markdown("### Consolidado por pozo")
+    st.dataframe(summary_well, use_container_width=True)
+
+    summary_month_well = (
+        monthly.groupby(["Mes", bateria_use, pozo_col, "Grupo conversión"], dropna=False)
+        .agg(agg_dict)
+        .reset_index()
+        .sort_values(["Mes", bateria_use, pozo_col])
+    )
+    st.markdown("### Consolidado mensual por pozo")
+    st.dataframe(summary_month_well, use_container_width=True)
+
+    report = make_excel_report(
+        filtered=filtered,
+        status_df=status_df,
+        summary_well=summary_well,
+        summary_month_well=summary_month_well,
+        monthly_drop=monthly_drop if "monthly_drop" in locals() else pd.DataFrame(),
+        daily_summary=daily_summary_for_report,
+    )
+    st.download_button(
+        "Descargar reporte Excel",
+        data=report,
+        file_name="reporte_swab.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+st.caption("Nota: el estado activo/inactivo usa mes calendario completo; las ventanas móviles de caídas se muestran solo como análisis complementario.")
