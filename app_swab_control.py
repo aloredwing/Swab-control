@@ -54,6 +54,45 @@ def default_index(options: List[str], value: Optional[str]) -> int:
     return 0
 
 
+REQUIRED_PLACEHOLDER = "Selecciona columna"
+
+
+def required_column_selectbox(label: str, columns: List[str], detected: Optional[str]) -> str:
+    """Selectbox para columnas obligatorias.
+
+    Si no se detecta una columna, no fuerza la primera columna del Excel,
+    porque eso puede hacer que FECHA quede también como POZO.
+    """
+    options = [REQUIRED_PLACEHOLDER] + columns
+    index = default_index(options, detected) if detected else 0
+    return st.sidebar.selectbox(label, options, index=index)
+
+
+def validate_required_mapping(fecha_col: str, pozo_col: str, columns: List[str], preview_df: pd.DataFrame) -> None:
+    missing = []
+    if fecha_col == REQUIRED_PLACEHOLDER:
+        missing.append("Columna fecha")
+    if pozo_col == REQUIRED_PLACEHOLDER:
+        missing.append("Columna pozo")
+
+    if missing:
+        st.warning("Selecciona las columnas obligatorias antes de continuar: " + ", ".join(missing))
+        with st.expander("Ver columnas detectadas en el archivo", expanded=True):
+            st.write(list(columns))
+            st.dataframe(preview_df.head(10), use_container_width=True)
+        st.stop()
+
+    if fecha_col == pozo_col:
+        st.error(
+            "Mapeo incorrecto: la columna de fecha y la columna de pozo no pueden ser la misma. "
+            "En tu captura, POZO quedó seleccionado como FECHA. Cambia 'Columna pozo' por la columna real del pozo."
+        )
+        with st.expander("Vista rápida para escoger la columna correcta", expanded=True):
+            st.write("Columnas disponibles:", list(columns))
+            st.dataframe(preview_df.head(15), use_container_width=True)
+        st.stop()
+
+
 def to_datetime_safe(series: pd.Series) -> pd.Series:
     result = pd.to_datetime(series, errors="coerce", dayfirst=True)
     if result.isna().mean() > 0.5:
@@ -555,7 +594,13 @@ if raw_df.empty:
 
 # Detección automática de columnas principales
 fecha_auto = find_column(columns, ["fecha", "date", "dia", "día", "periodo", "fecha produccion", "fecha swab"])
-pozo_auto = find_column(columns, ["pozo", "well", "nombre pozo", "codigo pozo", "id pozo"])
+pozo_auto = find_column(
+    columns,
+    [
+        "pozo", "pozos", "well", "wells", "nombre pozo", "codigo pozo", "id pozo",
+        "pozo swab", "codigo", "codigo de pozo", "well name", "wellname", "uwi"
+    ],
+)
 bateria_auto = find_column(columns, ["bateria", "batería", "battery", "estacion", "estación", "planta"])
 gas_auto = find_column(columns, ["gas", "qgas", "q gas", "gas mscf", "gas mpcd", "gas mmscf", "produccion gas", "producción gas", "prod gas"])
 petroleo_auto = find_column(columns, ["prcr", "petroleo", "petróleo", "oil", "condensado", "cond", "bopd", "bls petroleo", "bls petróleo", "prod petroleo", "produccion"])
@@ -567,8 +612,10 @@ st.sidebar.header("Mapeo de columnas")
 options_required = columns
 options_optional = ["No aplica"] + columns
 
-fecha_col = st.sidebar.selectbox("Columna fecha", options_required, index=default_index(options_required, fecha_auto))
-pozo_col = st.sidebar.selectbox("Columna pozo", options_required, index=default_index(options_required, pozo_auto))
+fecha_col = required_column_selectbox("Columna fecha", options_required, fecha_auto)
+pozo_col = required_column_selectbox("Columna pozo", options_required, pozo_auto)
+validate_required_mapping(fecha_col, pozo_col, columns, raw_df)
+
 bateria_col = st.sidebar.selectbox("Columna batería", options_optional, index=default_index(options_optional, bateria_auto))
 gas_col = st.sidebar.selectbox("Columna gas", options_optional, index=default_index(options_optional, gas_auto))
 petroleo_col = st.sidebar.selectbox("Columna petróleo, condensado o PRCR", options_optional, index=default_index(options_optional, petroleo_auto))
@@ -690,8 +737,19 @@ status_value_col = st.sidebar.selectbox(
 
 # Filtros principales
 st.sidebar.header("Filtros")
-min_date = df[fecha_col].min().date()
-max_date = df[fecha_col].max().date()
+# Refuerzo defensivo: conserva fecha como datetime aunque el usuario cambie el mapeo.
+df[fecha_col] = to_datetime_safe(df[fecha_col])
+df = df[df[fecha_col].notna()].copy()
+if df.empty:
+    st.error("No quedaron fechas válidas después del mapeo. Revisa la columna fecha.")
+    st.stop()
+min_timestamp = df[fecha_col].min()
+max_timestamp = df[fecha_col].max()
+if pd.isna(min_timestamp) or pd.isna(max_timestamp):
+    st.error("No se pudo determinar el rango de fechas. Revisa la columna fecha.")
+    st.stop()
+min_date = min_timestamp.date()
+max_date = max_timestamp.date()
 date_range = st.sidebar.date_input("Rango de fecha para gráficas", value=(min_date, max_date), min_value=min_date, max_value=max_date)
 
 if isinstance(date_range, tuple) and len(date_range) == 2:
