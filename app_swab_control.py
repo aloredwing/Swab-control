@@ -1,6 +1,5 @@
 import io
 import re
-from datetime import date
 
 import numpy as np
 import pandas as pd
@@ -8,9 +7,9 @@ import plotly.express as px
 import streamlit as st
 
 from pptx import Presentation
-from pptx.util import Inches, Pt
+from pptx.chart.data import CategoryChartData
 from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
-from pptx.enum.text import PP_ALIGN
+from pptx.util import Inches, Pt
 
 
 st.set_page_config(
@@ -21,12 +20,12 @@ st.set_page_config(
 
 
 # ============================================================
-# POZOS CONVERTIDOS CONOCIDOS
-# Si el Excel cargado no trae las hojas Swab 2024, 2025 o 2026,
-# el sistema usa esta lista como respaldo.
+# POZOS CONVERTIDOS
+# Estos pozos quedan fijos en el código.
+# Todo pozo que no esté en estas listas se considera BÁSICA.
 # ============================================================
 
-CONVERTIDOS_FALLBACK = {
+CONVERTIDOS = {
     2024: [
         "EA11934D", "EA 1868", "EA 8291", "EA 8561", "EA 8547",
         "EA11873D", "EA11054", "EA 8569", "AA11122D", "EA11204D",
@@ -100,88 +99,87 @@ def limpiar_texto(valor):
     return texto
 
 
-def normalizar_columna(col):
-    texto = str(col).strip()
-    texto = re.sub(r"\s+", " ", texto)
+def normalizar_columna(columna):
+    texto = str(columna).strip().upper()
+    texto = texto.replace("Á", "A").replace("É", "E").replace("Í", "I").replace("Ó", "O").replace("Ú", "U")
+    texto = re.sub(r"\s+", "_", texto)
     return texto
-
-
-def encontrar_hoja(sheet_names, objetivo):
-    objetivo = objetivo.strip().lower()
-    for hoja in sheet_names:
-        if str(hoja).strip().lower() == objetivo:
-            return hoja
-    return None
 
 
 def convertir_numero(serie):
     return pd.to_numeric(serie, errors="coerce").fillna(0)
 
 
+def clasificar_pozo(pozo_key):
+    for anio, pozos in CONVERTIDOS.items():
+        lista_key = [limpiar_pozo(p) for p in pozos]
+        if pozo_key in lista_key:
+            return f"Convertido {anio}"
+    return "Básica"
+
+
+def obtener_anio_conversion(pozo_key):
+    for anio, pozos in CONVERTIDOS.items():
+        lista_key = [limpiar_pozo(p) for p in pozos]
+        if pozo_key in lista_key:
+            return anio
+    return 0
+
+
 def normalizar_tipo_swab(valor):
     texto = limpiar_texto(valor)
+
+    if texto in ["TBG", "TB", "TS", "TUBING", "TUBING SWAB"]:
+        return "TS"
 
     if texto in ["CS", "CSG", "CASING", "CASING SWAB"]:
         return "CS"
 
-    if texto in ["TS", "TBG", "T BG", "TUBING", "TUBING SWAB", "TB"]:
+    if "TBG" in texto or "TUB" in texto or texto == "TS":
         return "TS"
 
     if "CS" in texto or "CAS" in texto:
         return "CS"
 
-    if "TB" in texto or "TBG" in texto or "TUB" in texto or texto == "TS":
-        return "TS"
+    if texto == "":
+        return "SIN TIPO"
 
-    return texto if texto else "SIN TIPO"
+    return texto
 
 
-def periodo_descripcion(anio, mes):
+def periodo_texto(anio, mes):
     if mes == 0:
         return f"Todo el año {anio}"
     return f"{MESES[mes]} {anio}"
 
 
-def detectar_fila_encabezado_convertidos(bytes_excel, hoja):
-    preview = pd.read_excel(
-        io.BytesIO(bytes_excel),
-        sheet_name=hoja,
-        header=None,
-        nrows=10
-    )
-
-    for idx, row in preview.iterrows():
-        valores = [str(v).strip().lower() for v in row.tolist()]
-        if "fecha" in valores and "total" in valores:
-            return idx
-
-    return 1
-
-
 # ============================================================
-# CARGA DE DATOS
+# CARGA DE EXCEL
 # ============================================================
 
 @st.cache_data(show_spinner=False)
-def cargar_datos_swab(bytes_excel):
+def cargar_excel_swab(bytes_excel):
     xls = pd.ExcelFile(io.BytesIO(bytes_excel))
-    hoja = encontrar_hoja(xls.sheet_names, "Datos de Swab")
 
-    if hoja is None:
-        raise ValueError("No encontré la hoja 'Datos de Swab'.")
+    if "Datos de Swab" in xls.sheet_names:
+        hoja = "Datos de Swab"
+    else:
+        hoja = xls.sheet_names[0]
 
-    columnas_necesarias = ["FECHA", "COD_POZ", "COD_BAT", "UNIDAD", "TSER", "PRCR", "PRAG"]
-    df = pd.read_excel(
-        io.BytesIO(bytes_excel),
-        sheet_name=hoja,
-        usecols=lambda c: str(c).strip().upper() in columnas_necesarias
-    )
+    df = pd.read_excel(io.BytesIO(bytes_excel), sheet_name=hoja)
+    df.columns = [normalizar_columna(c) for c in df.columns]
 
-    df.columns = [str(c).strip().upper() for c in df.columns]
+    requeridas = ["FECHA", "COD_POZ", "COD_BAT", "UNIDAD", "TSER", "PRCR", "PRAG"]
+    faltantes = [c for c in requeridas if c not in df.columns]
 
-    faltantes = [c for c in columnas_necesarias if c not in df.columns]
     if faltantes:
-        raise ValueError(f"Faltan columnas en Datos de Swab: {faltantes}")
+        raise ValueError(
+            "Faltan estas columnas obligatorias: "
+            + ", ".join(faltantes)
+            + ". Revisa que el Excel tenga FECHA, COD_POZ, COD_BAT, UNIDAD, TSER, PRCR y PRAG."
+        )
+
+    df = df[requeridas].copy()
 
     df["FECHA"] = pd.to_datetime(df["FECHA"], errors="coerce")
     df = df[df["FECHA"].notna()].copy()
@@ -190,239 +188,55 @@ def cargar_datos_swab(bytes_excel):
     df["POZO_KEY"] = df["COD_POZ"].apply(limpiar_pozo)
     df["BATERIA"] = df["COD_BAT"].apply(limpiar_texto)
     df["UNIDAD"] = df["UNIDAD"].apply(limpiar_texto)
-    df["TSER_ORIGINAL"] = df["TSER"].apply(limpiar_texto)
     df["TIPO_SWAB"] = df["TSER"].apply(normalizar_tipo_swab)
     df["PRCR"] = convertir_numero(df["PRCR"])
     df["PRAG"] = convertir_numero(df["PRAG"])
 
     df = df[df["POZO_KEY"] != ""].copy()
+
     df["ANIO"] = df["FECHA"].dt.year
     df["MES"] = df["FECHA"].dt.month
     df["MES_NOMBRE"] = df["MES"].map(MESES)
-    df["PERIODO_MES"] = df["FECHA"].dt.to_period("M").dt.to_timestamp()
 
-    return df
+    df["CLASIFICACION"] = df["POZO_KEY"].apply(clasificar_pozo)
+    df["ANIO_CONVERSION"] = df["POZO_KEY"].apply(obtener_anio_conversion)
 
-
-@st.cache_data(show_spinner=False)
-def extraer_convertidos_desde_excel(bytes_excel):
-    xls = pd.ExcelFile(io.BytesIO(bytes_excel))
-    registros = []
-
-    for anio in [2024, 2025, 2026]:
-        nombre_hoja = f"Swab {anio} (Dia)"
-        hoja = encontrar_hoja(xls.sheet_names, nombre_hoja)
-
-        if hoja is None:
-            continue
-
-        try:
-            header_row = detectar_fila_encabezado_convertidos(bytes_excel, hoja)
-            temp = pd.read_excel(io.BytesIO(bytes_excel), sheet_name=hoja, header=header_row, nrows=2)
-
-            columnas = [str(c).strip() for c in temp.columns]
-            columnas_pozo = columnas[3:]
-
-            for pozo in columnas_pozo:
-                if pozo == "" or pozo.lower().startswith("unnamed"):
-                    continue
-
-                registros.append({
-                    "POZO": mostrar_pozo(pozo),
-                    "POZO_KEY": limpiar_pozo(pozo),
-                    "ANIO_CONVERSION": anio,
-                    "CLASIFICACION": f"Convertido {anio}",
-                    "FUENTE_CONVERSION": f"Hoja {nombre_hoja}"
-                })
-        except Exception:
-            continue
-
-    if not registros:
-        return pd.DataFrame(columns=["POZO", "POZO_KEY", "ANIO_CONVERSION", "CLASIFICACION", "FUENTE_CONVERSION"])
-
-    salida = pd.DataFrame(registros)
-    salida = salida[salida["POZO_KEY"] != ""].drop_duplicates("POZO_KEY")
-    return salida
+    return df, hoja
 
 
-def convertir_fallback_a_df():
-    registros = []
-
-    for anio, pozos in CONVERTIDOS_FALLBACK.items():
-        for pozo in pozos:
-            registros.append({
-                "POZO": mostrar_pozo(pozo),
-                "POZO_KEY": limpiar_pozo(pozo),
-                "ANIO_CONVERSION": anio,
-                "CLASIFICACION": f"Convertido {anio}",
-                "FUENTE_CONVERSION": "Lista fija de respaldo"
-            })
-
-    salida = pd.DataFrame(registros)
-    salida = salida.drop_duplicates("POZO_KEY")
-    return salida
-
-
-@st.cache_data(show_spinner=False)
-def cargar_base_pozos(bytes_excel):
-    xls = pd.ExcelFile(io.BytesIO(bytes_excel))
-
-    posibles_hojas = ["Swab Básica", "Swab (Batería)", "Swab 2024", "Estado Oct 2024"]
-
-    bases = []
-
-    for nombre in posibles_hojas:
-        hoja = encontrar_hoja(xls.sheet_names, nombre)
-
-        if hoja is None:
-            continue
-
-        try:
-            temp = pd.read_excel(io.BytesIO(bytes_excel), sheet_name=hoja)
-            temp.columns = [normalizar_columna(c) for c in temp.columns]
-
-            col_pozo = None
-            for posible in ["Pozo", "POZO", "P O Z O", "*PFORMACION"]:
-                if posible in temp.columns:
-                    col_pozo = posible
-                    break
-
-            if col_pozo is None:
-                continue
-
-            col_bat = None
-            for posible in ["Battery", "BATERIA", "BATERÍA", "*BATERIA"]:
-                if posible in temp.columns:
-                    col_bat = posible
-                    break
-
-            base = pd.DataFrame()
-            base["POZO"] = temp[col_pozo].apply(mostrar_pozo)
-            base["POZO_KEY"] = temp[col_pozo].apply(limpiar_pozo)
-
-            if col_bat is not None:
-                base["BATERIA_BASE"] = temp[col_bat].apply(limpiar_texto)
-            else:
-                base["BATERIA_BASE"] = ""
-
-            if "Potential (bopd)" in temp.columns:
-                base["POTENCIAL_BOPD"] = convertir_numero(temp["Potential (bopd)"])
-            elif "Potential (bopd)." in temp.columns:
-                base["POTENCIAL_BOPD"] = convertir_numero(temp["Potential (bopd)."])
-            else:
-                base["POTENCIAL_BOPD"] = 0
-
-            base = base[base["POZO_KEY"] != ""].copy()
-            bases.append(base)
-
-        except Exception:
-            continue
-
-    if not bases:
-        return pd.DataFrame(columns=["POZO", "POZO_KEY", "BATERIA_BASE", "POTENCIAL_BOPD"])
-
-    salida = pd.concat(bases, ignore_index=True)
-    salida = salida.drop_duplicates("POZO_KEY")
-    return salida
-
-
-def combinar_convertidos(convertidos_excel, usar_respaldo=True):
-    respaldo = convertir_fallback_a_df()
-
-    if convertidos_excel.empty:
-        return respaldo.copy() if usar_respaldo else convertidos_excel.copy()
-
-    combinado = pd.concat([convertidos_excel, respaldo], ignore_index=True)
-    combinado["PRIORIDAD"] = combinado["FUENTE_CONVERSION"].apply(
-        lambda x: 1 if str(x).startswith("Hoja") else 2
-    )
-    combinado = combinado.sort_values(["POZO_KEY", "PRIORIDAD"])
-    combinado = combinado.drop_duplicates("POZO_KEY", keep="first")
-    combinado = combinado.drop(columns=["PRIORIDAD"])
-
-    return combinado
-
-
-def construir_universo(df, convertidos, base_pozos):
-    historico = (
+def construir_universo(df):
+    universo = (
         df.sort_values("FECHA")
         .groupby("POZO_KEY", as_index=False)
         .agg(
-            POZO_HIST=("POZO", "last"),
-            BATERIA_HIST=("BATERIA", "last"),
-            ULTIMA_FECHA_HIST=("FECHA", "max")
+            POZO=("POZO", "last"),
+            BATERIA=("BATERIA", "last"),
+            CLASIFICACION=("CLASIFICACION", "last"),
+            ANIO_CONVERSION=("ANIO_CONVERSION", "last"),
+            ULTIMA_FECHA_HISTORICA=("FECHA", "max")
         )
     )
-
-    universo = historico.copy()
-    universo = universo.rename(columns={
-        "POZO_HIST": "POZO",
-        "BATERIA_HIST": "BATERIA"
-    })
-
-    if not base_pozos.empty:
-        universo = universo.merge(
-            base_pozos[["POZO_KEY", "POZO", "BATERIA_BASE", "POTENCIAL_BOPD"]],
-            on="POZO_KEY",
-            how="outer",
-            suffixes=("", "_BASE")
-        )
-
-        universo["POZO_FINAL"] = universo["POZO"]
-        universo.loc[universo["POZO_FINAL"].isna() | (universo["POZO_FINAL"] == ""), "POZO_FINAL"] = universo["POZO_BASE"]
-
-        universo["BATERIA_FINAL"] = universo["BATERIA"]
-        universo.loc[
-            universo["BATERIA_FINAL"].isna() | (universo["BATERIA_FINAL"] == ""),
-            "BATERIA_FINAL"
-        ] = universo["BATERIA_BASE"]
-
-        universo["POZO"] = universo["POZO_FINAL"]
-        universo["BATERIA"] = universo["BATERIA_FINAL"]
-
-        universo = universo.drop(columns=[
-            c for c in ["POZO_BASE", "POZO_FINAL", "BATERIA_BASE", "BATERIA_FINAL"]
-            if c in universo.columns
-        ])
-    else:
-        universo["POTENCIAL_BOPD"] = 0
-
-    universo = universo.merge(
-        convertidos[["POZO_KEY", "ANIO_CONVERSION", "CLASIFICACION", "FUENTE_CONVERSION"]],
-        on="POZO_KEY",
-        how="left"
-    )
-
-    universo["ANIO_CONVERSION"] = universo["ANIO_CONVERSION"].fillna(0).astype(int)
-    universo["CLASIFICACION"] = universo["CLASIFICACION"].fillna("Básica")
-    universo["FUENTE_CONVERSION"] = universo["FUENTE_CONVERSION"].fillna("No convertido")
-
-    universo["POZO"] = universo["POZO"].fillna("")
-    universo["BATERIA"] = universo["BATERIA"].fillna("")
-    universo["POTENCIAL_BOPD"] = universo["POTENCIAL_BOPD"].fillna(0)
-
-    universo = universo[universo["POZO_KEY"] != ""].drop_duplicates("POZO_KEY")
 
     return universo
 
 
 # ============================================================
-# ANÁLISIS
+# CÁLCULOS
 # ============================================================
 
-def aplicar_filtros_base(universo, baterias_sel, clases_sel):
-    salida = universo.copy()
+def aplicar_filtros_universo(universo, baterias_sel, clases_sel):
+    data = universo.copy()
 
     if baterias_sel:
-        salida = salida[salida["BATERIA"].isin(baterias_sel)]
+        data = data[data["BATERIA"].isin(baterias_sel)]
 
     if clases_sel:
-        salida = salida[salida["CLASIFICACION"].isin(clases_sel)]
+        data = data[data["CLASIFICACION"].isin(clases_sel)]
 
-    return salida
+    return data
 
 
-def filtrar_periodo(df, anio, mes, baterias_sel, tipos_sel, clases_sel, universo):
+def filtrar_movimientos(df, anio, mes, baterias_sel, tipos_sel, clases_sel):
     data = df[df["ANIO"] == anio].copy()
 
     if mes != 0:
@@ -434,32 +248,28 @@ def filtrar_periodo(df, anio, mes, baterias_sel, tipos_sel, clases_sel, universo
     if tipos_sel:
         data = data[data["TIPO_SWAB"].isin(tipos_sel)]
 
-    mapa_clase = universo[["POZO_KEY", "CLASIFICACION"]].drop_duplicates("POZO_KEY")
-    data = data.merge(mapa_clase, on="POZO_KEY", how="left")
-    data["CLASIFICACION"] = data["CLASIFICACION"].fillna("Básica")
-
     if clases_sel:
         data = data[data["CLASIFICACION"].isin(clases_sel)]
 
     return data
 
 
-def resumir_periodo(data_periodo, universo_filtrado):
+def resumir_pozos(data_periodo, universo_filtrado):
     if data_periodo.empty:
-        resumen = universo_filtrado.copy()
-        resumen["INTERVENCIONES"] = 0
-        resumen["PRCR"] = 0.0
-        resumen["PRAG"] = 0.0
-        resumen["OIL_POR_INTERV"] = 0.0
-        resumen["AGUA_POR_INTERV"] = 0.0
-        resumen["TIPO_SWAB"] = ""
-        resumen["UNIDADES"] = ""
-        resumen["PRIMERA_FECHA"] = pd.NaT
-        resumen["ULTIMA_FECHA"] = pd.NaT
-        resumen["ESTADO_MES"] = "No intervenido"
-        return resumen
+        salida = universo_filtrado.copy()
+        salida["INTERVENCIONES"] = 0
+        salida["PRCR"] = 0.0
+        salida["PRAG"] = 0.0
+        salida["OIL_POR_INTERV"] = 0.0
+        salida["AGUA_POR_INTERV"] = 0.0
+        salida["TIPO_SWAB"] = ""
+        salida["UNIDADES"] = ""
+        salida["PRIMERA_FECHA"] = pd.NaT
+        salida["ULTIMA_FECHA"] = pd.NaT
+        salida["ESTADO"] = "No intervenido"
+        return salida
 
-    agg = (
+    resumen = (
         data_periodo
         .groupby("POZO_KEY", as_index=False)
         .agg(
@@ -475,90 +285,14 @@ def resumir_periodo(data_periodo, universo_filtrado):
         )
     )
 
-    resumen = universo_filtrado.merge(agg, on="POZO_KEY", how="left")
+    salida = universo_filtrado.merge(resumen, on="POZO_KEY", how="left")
 
-    resumen["POZO"] = resumen["POZO"].fillna(resumen["POZO_REAL"])
-    resumen["BATERIA"] = resumen["BATERIA"].fillna(resumen["BATERIA_REAL"])
+    salida["POZO"] = salida["POZO"].fillna(salida["POZO_REAL"])
+    salida["BATERIA"] = salida["BATERIA"].fillna(salida["BATERIA_REAL"])
 
-    for col in ["INTERVENCIONES", "PRCR", "PRAG"]:
-        resumen[col] = resumen[col].fillna(0)
-
-    resumen["INTERVENCIONES"] = resumen["INTERVENCIONES"].astype(int)
-    resumen["OIL_POR_INTERV"] = np.where(
-        resumen["INTERVENCIONES"] > 0,
-        resumen["PRCR"] / resumen["INTERVENCIONES"],
-        0
-    )
-    resumen["AGUA_POR_INTERV"] = np.where(
-        resumen["INTERVENCIONES"] > 0,
-        resumen["PRAG"] / resumen["INTERVENCIONES"],
-        0
-    )
-    resumen["TIPO_SWAB"] = resumen["TIPO_SWAB"].fillna("")
-    resumen["UNIDADES"] = resumen["UNIDADES"].fillna("")
-    resumen["ESTADO_MES"] = np.where(resumen["INTERVENCIONES"] > 0, "Intervenido", "No intervenido")
-
-    columnas_drop = [c for c in ["POZO_REAL", "BATERIA_REAL"] if c in resumen.columns]
-    resumen = resumen.drop(columns=columnas_drop)
-
-    return resumen
-
-
-def resumen_por_bateria(data_periodo, universo_filtrado):
-    universo_bat = (
-        universo_filtrado
-        .groupby("BATERIA", as_index=False)
-        .agg(POZOS_UNIVERSO=("POZO_KEY", "nunique"))
-    )
-
-    if data_periodo.empty:
-        universo_bat["POZOS_INTERVENIDOS"] = 0
-        universo_bat["INTERVENCIONES"] = 0
-        universo_bat["PRCR"] = 0.0
-        universo_bat["PRAG"] = 0.0
-        universo_bat["POZOS_NO_INTERVENIDOS"] = universo_bat["POZOS_UNIVERSO"]
-        return universo_bat
-
-    prod = (
-        data_periodo
-        .groupby("BATERIA", as_index=False)
-        .agg(
-            POZOS_INTERVENIDOS=("POZO_KEY", "nunique"),
-            INTERVENCIONES=("FECHA", "count"),
-            PRCR=("PRCR", "sum"),
-            PRAG=("PRAG", "sum")
-        )
-    )
-
-    salida = universo_bat.merge(prod, on="BATERIA", how="left")
-
-    for col in ["POZOS_INTERVENIDOS", "INTERVENCIONES", "PRCR", "PRAG"]:
-        salida[col] = salida[col].fillna(0)
-
-    salida["POZOS_NO_INTERVENIDOS"] = salida["POZOS_UNIVERSO"] - salida["POZOS_INTERVENIDOS"]
-    salida["OIL_POR_INTERV"] = np.where(
-        salida["INTERVENCIONES"] > 0,
-        salida["PRCR"] / salida["INTERVENCIONES"],
-        0
-    )
-
-    return salida.sort_values("PRCR", ascending=False)
-
-
-def resumen_por_tipo(data_periodo):
-    if data_periodo.empty:
-        return pd.DataFrame(columns=["TIPO_SWAB", "INTERVENCIONES", "POZOS", "PRCR", "PRAG", "OIL_POR_INTERV"])
-
-    salida = (
-        data_periodo
-        .groupby("TIPO_SWAB", as_index=False)
-        .agg(
-            INTERVENCIONES=("FECHA", "count"),
-            POZOS=("POZO_KEY", "nunique"),
-            PRCR=("PRCR", "sum"),
-            PRAG=("PRAG", "sum")
-        )
-    )
+    salida["INTERVENCIONES"] = salida["INTERVENCIONES"].fillna(0).astype(int)
+    salida["PRCR"] = salida["PRCR"].fillna(0)
+    salida["PRAG"] = salida["PRAG"].fillna(0)
 
     salida["OIL_POR_INTERV"] = np.where(
         salida["INTERVENCIONES"] > 0,
@@ -566,17 +300,29 @@ def resumen_por_tipo(data_periodo):
         0
     )
 
-    return salida.sort_values("PRCR", ascending=False)
+    salida["AGUA_POR_INTERV"] = np.where(
+        salida["INTERVENCIONES"] > 0,
+        salida["PRAG"] / salida["INTERVENCIONES"],
+        0
+    )
+
+    salida["TIPO_SWAB"] = salida["TIPO_SWAB"].fillna("")
+    salida["UNIDADES"] = salida["UNIDADES"].fillna("")
+    salida["ESTADO"] = np.where(salida["INTERVENCIONES"] > 0, "Intervenido", "No intervenido")
+
+    salida = salida.drop(columns=[c for c in ["POZO_REAL", "BATERIA_REAL"] if c in salida.columns])
+
+    return salida
 
 
-def resumen_por_clase(resumen_pozos):
+def resumen_baterias(resumen_pozos):
     salida = (
         resumen_pozos
-        .groupby("CLASIFICACION", as_index=False)
+        .groupby("BATERIA", as_index=False)
         .agg(
-            POZOS=("POZO_KEY", "nunique"),
-            POZOS_INTERVENIDOS=("ESTADO_MES", lambda x: (x == "Intervenido").sum()),
-            POZOS_NO_INTERVENIDOS=("ESTADO_MES", lambda x: (x == "No intervenido").sum()),
+            POZOS_TOTAL=("POZO_KEY", "nunique"),
+            POZOS_INTERVENIDOS=("ESTADO", lambda x: (x == "Intervenido").sum()),
+            POZOS_NO_INTERVENIDOS=("ESTADO", lambda x: (x == "No intervenido").sum()),
             INTERVENCIONES=("INTERVENCIONES", "sum"),
             PRCR=("PRCR", "sum"),
             PRAG=("PRAG", "sum")
@@ -592,7 +338,54 @@ def resumen_por_clase(resumen_pozos):
     return salida.sort_values("PRCR", ascending=False)
 
 
-def tendencia_mensual(df, anio, universo, baterias_sel, clases_sel, tipos_sel):
+def resumen_tipo_swab(data_periodo):
+    if data_periodo.empty:
+        return pd.DataFrame(columns=["TIPO_SWAB", "POZOS", "INTERVENCIONES", "PRCR", "PRAG", "OIL_POR_INTERV"])
+
+    salida = (
+        data_periodo
+        .groupby("TIPO_SWAB", as_index=False)
+        .agg(
+            POZOS=("POZO_KEY", "nunique"),
+            INTERVENCIONES=("FECHA", "count"),
+            PRCR=("PRCR", "sum"),
+            PRAG=("PRAG", "sum")
+        )
+    )
+
+    salida["OIL_POR_INTERV"] = np.where(
+        salida["INTERVENCIONES"] > 0,
+        salida["PRCR"] / salida["INTERVENCIONES"],
+        0
+    )
+
+    return salida.sort_values("PRCR", ascending=False)
+
+
+def resumen_clasificacion(resumen_pozos):
+    salida = (
+        resumen_pozos
+        .groupby("CLASIFICACION", as_index=False)
+        .agg(
+            POZOS_TOTAL=("POZO_KEY", "nunique"),
+            POZOS_INTERVENIDOS=("ESTADO", lambda x: (x == "Intervenido").sum()),
+            POZOS_NO_INTERVENIDOS=("ESTADO", lambda x: (x == "No intervenido").sum()),
+            INTERVENCIONES=("INTERVENCIONES", "sum"),
+            PRCR=("PRCR", "sum"),
+            PRAG=("PRAG", "sum")
+        )
+    )
+
+    salida["OIL_POR_INTERV"] = np.where(
+        salida["INTERVENCIONES"] > 0,
+        salida["PRCR"] / salida["INTERVENCIONES"],
+        0
+    )
+
+    return salida.sort_values("PRCR", ascending=False)
+
+
+def tendencia_mensual(df, anio, baterias_sel, tipos_sel, clases_sel):
     data = df[df["ANIO"] == anio].copy()
 
     if baterias_sel:
@@ -601,22 +394,18 @@ def tendencia_mensual(df, anio, universo, baterias_sel, clases_sel, tipos_sel):
     if tipos_sel:
         data = data[data["TIPO_SWAB"].isin(tipos_sel)]
 
-    mapa_clase = universo[["POZO_KEY", "CLASIFICACION"]].drop_duplicates("POZO_KEY")
-    data = data.merge(mapa_clase, on="POZO_KEY", how="left")
-    data["CLASIFICACION"] = data["CLASIFICACION"].fillna("Básica")
-
     if clases_sel:
         data = data[data["CLASIFICACION"].isin(clases_sel)]
 
     if data.empty:
-        return pd.DataFrame(columns=["MES", "MES_NOMBRE", "INTERVENCIONES", "POZOS", "PRCR", "PRAG", "OIL_POR_INTERV"])
+        return pd.DataFrame(columns=["MES", "MES_NOMBRE", "POZOS", "INTERVENCIONES", "PRCR", "PRAG", "OIL_POR_INTERV"])
 
     salida = (
         data
         .groupby(["MES", "MES_NOMBRE"], as_index=False)
         .agg(
-            INTERVENCIONES=("FECHA", "count"),
             POZOS=("POZO_KEY", "nunique"),
+            INTERVENCIONES=("FECHA", "count"),
             PRCR=("PRCR", "sum"),
             PRAG=("PRAG", "sum")
         )
@@ -629,12 +418,6 @@ def tendencia_mensual(df, anio, universo, baterias_sel, clases_sel, tipos_sel):
         0
     )
 
-    return salida
-
-
-def top_no_intervenidos(resumen_pozos):
-    salida = resumen_pozos[resumen_pozos["ESTADO_MES"] == "No intervenido"].copy()
-    salida = salida.sort_values(["CLASIFICACION", "BATERIA", "POZO"])
     return salida
 
 
@@ -652,79 +435,79 @@ def formatear_tabla(df):
 
 
 # ============================================================
-# DESCARGAS
+# EXPORTACIÓN
 # ============================================================
 
-def crear_excel_resultados(tablas):
+def crear_excel_descarga(tablas):
     buffer = io.BytesIO()
 
     with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
         for nombre, tabla in tablas.items():
-            nombre_hoja = nombre[:31]
-            formatear_tabla(tabla).to_excel(writer, sheet_name=nombre_hoja, index=False)
+            hoja = nombre[:31]
+            tabla_out = formatear_tabla(tabla)
+            tabla_out.to_excel(writer, sheet_name=hoja, index=False)
 
             workbook = writer.book
-            worksheet = writer.sheets[nombre_hoja]
+            worksheet = writer.sheets[hoja]
 
-            header_format = workbook.add_format({
+            formato_header = workbook.add_format({
                 "bold": True,
                 "bg_color": "#D9EAF7",
                 "border": 1
             })
 
-            for col_num, value in enumerate(formatear_tabla(tabla).columns.values):
-                worksheet.write(0, col_num, value, header_format)
-                worksheet.set_column(col_num, col_num, 16)
+            for col_num, value in enumerate(tabla_out.columns):
+                worksheet.write(0, col_num, value, formato_header)
+                worksheet.set_column(col_num, col_num, 18)
 
     buffer.seek(0)
     return buffer.getvalue()
 
 
-def agregar_titulo(slide, titulo, subtitulo=None):
-    title_box = slide.shapes.add_textbox(Inches(0.4), Inches(0.25), Inches(12.5), Inches(0.5))
-    tf = title_box.text_frame
+def agregar_titulo(slide, titulo, subtitulo):
+    box = slide.shapes.add_textbox(Inches(0.4), Inches(0.25), Inches(12.4), Inches(0.5))
+    tf = box.text_frame
     tf.text = titulo
     tf.paragraphs[0].font.size = Pt(22)
     tf.paragraphs[0].font.bold = True
 
-    if subtitulo:
-        sub_box = slide.shapes.add_textbox(Inches(0.4), Inches(0.75), Inches(12.5), Inches(0.35))
-        tf2 = sub_box.text_frame
-        tf2.text = subtitulo
-        tf2.paragraphs[0].font.size = Pt(11)
+    box2 = slide.shapes.add_textbox(Inches(0.4), Inches(0.75), Inches(12.4), Inches(0.35))
+    tf2 = box2.text_frame
+    tf2.text = subtitulo
+    tf2.paragraphs[0].font.size = Pt(11)
 
 
-def agregar_tabla(slide, df, x, y, w, h, font_size=8):
+def agregar_tabla(slide, df, x, y, w, h, font_size=7):
     if df.empty:
         box = slide.shapes.add_textbox(x, y, w, h)
-        box.text_frame.text = "Sin datos para mostrar"
+        box.text_frame.text = "Sin datos"
         return
 
-    df_show = formatear_tabla(df).head(12)
-    rows = len(df_show) + 1
-    cols = len(df_show.columns)
+    tabla = formatear_tabla(df).head(15)
+    rows = len(tabla) + 1
+    cols = len(tabla.columns)
 
     table_shape = slide.shapes.add_table(rows, cols, x, y, w, h)
     table = table_shape.table
 
-    for j, col in enumerate(df_show.columns):
+    for j, col in enumerate(tabla.columns):
         cell = table.cell(0, j)
         cell.text = str(col)
         cell.text_frame.paragraphs[0].font.bold = True
         cell.text_frame.paragraphs[0].font.size = Pt(font_size)
 
-    for i, (_, row) in enumerate(df_show.iterrows(), start=1):
-        for j, col in enumerate(df_show.columns):
+    for i, (_, row) in enumerate(tabla.iterrows(), start=1):
+        for j, col in enumerate(tabla.columns):
             cell = table.cell(i, j)
             cell.text = "" if pd.isna(row[col]) else str(row[col])
             cell.text_frame.paragraphs[0].font.size = Pt(font_size)
 
 
-def agregar_grafico_barras(slide, titulo, categorias, valores, x, y, w, h, nombre_serie="Valor"):
+def agregar_barras(slide, titulo, categorias, valores, x, y, w, h, nombre_serie):
     categorias = list(categorias)
     valores = [0 if pd.isna(v) else float(v) for v in valores]
 
-    if not categorias:
+    if len(categorias) == 0:
         return
 
     chart_data = CategoryChartData()
@@ -733,36 +516,29 @@ def agregar_grafico_barras(slide, titulo, categorias, valores, x, y, w, h, nombr
 
     chart = slide.shapes.add_chart(
         XL_CHART_TYPE.COLUMN_CLUSTERED,
-        x,
-        y,
-        w,
-        h,
+        x, y, w, h,
         chart_data
     ).chart
 
     chart.has_legend = False
     chart.chart_title.has_text_frame = True
     chart.chart_title.text_frame.text = titulo
-    chart.value_axis.has_major_gridlines = True
 
 
-def agregar_grafico_linea(slide, titulo, categorias, serie_1, serie_2, x, y, w, h):
+def agregar_linea(slide, titulo, categorias, serie_prcr, serie_prag, x, y, w, h):
     categorias = list(categorias)
 
-    if not categorias:
+    if len(categorias) == 0:
         return
 
     chart_data = CategoryChartData()
     chart_data.categories = categorias
-    chart_data.add_series("PRCR", [0 if pd.isna(v) else float(v) for v in serie_1])
-    chart_data.add_series("PRAG", [0 if pd.isna(v) else float(v) for v in serie_2])
+    chart_data.add_series("PRCR", [0 if pd.isna(v) else float(v) for v in serie_prcr])
+    chart_data.add_series("PRAG", [0 if pd.isna(v) else float(v) for v in serie_prag])
 
     chart = slide.shapes.add_chart(
         XL_CHART_TYPE.LINE_MARKERS,
-        x,
-        y,
-        w,
-        h,
+        x, y, w, h,
         chart_data
     ).chart
 
@@ -772,7 +548,7 @@ def agregar_grafico_linea(slide, titulo, categorias, serie_1, serie_2, x, y, w, 
     chart.chart_title.text_frame.text = titulo
 
 
-def crear_ppt_resultados(periodo_txt, kpis, resumen_pozos, resumen_bateria, resumen_tipo, resumen_clase, tendencia):
+def crear_ppt(periodo, kpis, resumen_pozos, resumen_bateria, resumen_tipo, resumen_clase, tendencia):
     prs = Presentation()
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
@@ -781,7 +557,7 @@ def crear_ppt_resultados(periodo_txt, kpis, resumen_pozos, resumen_bateria, resu
 
     # Slide 1
     slide = prs.slides.add_slide(blank)
-    agregar_titulo(slide, "Dashboard SWAB Lote X", periodo_txt)
+    agregar_titulo(slide, "Dashboard operativo SWAB Lote X", periodo)
 
     kpi_df = pd.DataFrame({
         "Indicador": [
@@ -804,58 +580,59 @@ def crear_ppt_resultados(periodo_txt, kpis, resumen_pozos, resumen_bateria, resu
         ]
     })
 
-    agregar_tabla(slide, kpi_df, Inches(0.5), Inches(1.3), Inches(5.1), Inches(3.0), font_size=11)
+    agregar_tabla(slide, kpi_df, Inches(0.5), Inches(1.25), Inches(5.2), Inches(3.0), font_size=10)
 
     estado_df = pd.DataFrame({
         "Estado": ["Intervenido", "No intervenido"],
         "Pozos": [kpis["pozos_intervenidos"], kpis["pozos_no_intervenidos"]]
     })
 
-    agregar_grafico_barras(
+    agregar_barras(
         slide,
         "Pozos intervenidos vs no intervenidos",
         estado_df["Estado"],
         estado_df["Pozos"],
-        Inches(6.1),
+        Inches(6.2),
         Inches(1.2),
-        Inches(6.6),
+        Inches(6.5),
         Inches(4.8),
         "Pozos"
     )
 
     # Slide 2
     slide = prs.slides.add_slide(blank)
-    agregar_titulo(slide, "Producción por tipo de pozo", periodo_txt)
+    agregar_titulo(slide, "Clasificación de pozos", periodo)
 
-    clase_plot = resumen_clase.sort_values("PRCR", ascending=False).head(8)
-    agregar_grafico_barras(
+    clase_plot = resumen_clase.sort_values("PRCR", ascending=False)
+    agregar_barras(
         slide,
         "PRCR por clasificación",
         clase_plot["CLASIFICACION"],
         clase_plot["PRCR"],
         Inches(0.5),
         Inches(1.2),
-        Inches(6.1),
+        Inches(6.4),
         Inches(5.4),
         "PRCR"
     )
 
     agregar_tabla(
         slide,
-        resumen_clase[["CLASIFICACION", "POZOS", "POZOS_INTERVENIDOS", "INTERVENCIONES", "PRCR", "PRAG", "OIL_POR_INTERV"]],
-        Inches(6.8),
+        resumen_clase[["CLASIFICACION", "POZOS_TOTAL", "POZOS_INTERVENIDOS", "POZOS_NO_INTERVENIDOS", "INTERVENCIONES", "PRCR", "PRAG"]],
+        Inches(7.1),
         Inches(1.2),
-        Inches(6.1),
+        Inches(5.7),
         Inches(5.4),
         font_size=7
     )
 
     # Slide 3
     slide = prs.slides.add_slide(blank)
-    agregar_titulo(slide, "Top pozos por producción de petróleo", periodo_txt)
+    agregar_titulo(slide, "Top pozos por producción PRCR", periodo)
 
     top_pozos = resumen_pozos[resumen_pozos["INTERVENCIONES"] > 0].sort_values("PRCR", ascending=False).head(15)
-    agregar_grafico_barras(
+
+    agregar_barras(
         slide,
         "Top 15 pozos por PRCR",
         top_pozos["POZO"],
@@ -863,7 +640,7 @@ def crear_ppt_resultados(periodo_txt, kpis, resumen_pozos, resumen_bateria, resu
         Inches(0.5),
         Inches(1.2),
         Inches(7.0),
-        Inches(5.5),
+        Inches(5.4),
         "PRCR"
     )
 
@@ -873,16 +650,17 @@ def crear_ppt_resultados(periodo_txt, kpis, resumen_pozos, resumen_bateria, resu
         Inches(7.7),
         Inches(1.2),
         Inches(5.2),
-        Inches(5.5),
+        Inches(5.4),
         font_size=7
     )
 
     # Slide 4
     slide = prs.slides.add_slide(blank)
-    agregar_titulo(slide, "Top baterías por producción", periodo_txt)
+    agregar_titulo(slide, "Top baterías", periodo)
 
     top_bat = resumen_bateria.sort_values("PRCR", ascending=False).head(15)
-    agregar_grafico_barras(
+
+    agregar_barras(
         slide,
         "Top 15 baterías por PRCR",
         top_bat["BATERIA"],
@@ -890,33 +668,32 @@ def crear_ppt_resultados(periodo_txt, kpis, resumen_pozos, resumen_bateria, resu
         Inches(0.5),
         Inches(1.2),
         Inches(7.0),
-        Inches(5.5),
+        Inches(5.4),
         "PRCR"
     )
 
     agregar_tabla(
         slide,
-        top_bat[["BATERIA", "POZOS_INTERVENIDOS", "POZOS_NO_INTERVENIDOS", "INTERVENCIONES", "PRCR", "PRAG", "OIL_POR_INTERV"]],
+        top_bat[["BATERIA", "POZOS_INTERVENIDOS", "POZOS_NO_INTERVENIDOS", "INTERVENCIONES", "PRCR", "PRAG"]],
         Inches(7.7),
         Inches(1.2),
         Inches(5.2),
-        Inches(5.5),
+        Inches(5.4),
         font_size=7
     )
 
     # Slide 5
     slide = prs.slides.add_slide(blank)
-    agregar_titulo(slide, "Producción por tipo de swab", periodo_txt)
+    agregar_titulo(slide, "TS y CS", periodo)
 
-    tipo_plot = resumen_tipo.sort_values("PRCR", ascending=False)
-    agregar_grafico_barras(
+    agregar_barras(
         slide,
-        "PRCR por TS o CS",
-        tipo_plot["TIPO_SWAB"],
-        tipo_plot["PRCR"],
+        "PRCR por tipo de swab",
+        resumen_tipo["TIPO_SWAB"],
+        resumen_tipo["PRCR"],
         Inches(0.5),
         Inches(1.2),
-        Inches(6.2),
+        Inches(6.5),
         Inches(5.4),
         "PRCR"
     )
@@ -924,19 +701,19 @@ def crear_ppt_resultados(periodo_txt, kpis, resumen_pozos, resumen_bateria, resu
     agregar_tabla(
         slide,
         resumen_tipo[["TIPO_SWAB", "POZOS", "INTERVENCIONES", "PRCR", "PRAG", "OIL_POR_INTERV"]],
-        Inches(7.0),
+        Inches(7.2),
         Inches(1.2),
-        Inches(5.8),
-        Inches(4.5),
-        font_size=9
+        Inches(5.6),
+        Inches(4.8),
+        font_size=8
     )
 
     # Slide 6
     slide = prs.slides.add_slide(blank)
-    agregar_titulo(slide, "Tendencia mensual del año seleccionado", periodo_txt)
+    agregar_titulo(slide, "Tendencia mensual", periodo)
 
     if not tendencia.empty:
-        agregar_grafico_linea(
+        agregar_linea(
             slide,
             "PRCR y PRAG por mes",
             tendencia["MES_NOMBRE"],
@@ -950,14 +727,14 @@ def crear_ppt_resultados(periodo_txt, kpis, resumen_pozos, resumen_bateria, resu
 
     # Slide 7
     slide = prs.slides.add_slide(blank)
-    agregar_titulo(slide, "Pozos no intervenidos", periodo_txt)
+    agregar_titulo(slide, "Pozos no intervenidos", periodo)
 
-    no_interv = resumen_pozos[resumen_pozos["ESTADO_MES"] == "No intervenido"].copy()
+    no_interv = resumen_pozos[resumen_pozos["ESTADO"] == "No intervenido"].copy()
     no_interv = no_interv.sort_values(["CLASIFICACION", "BATERIA", "POZO"]).head(20)
 
     agregar_tabla(
         slide,
-        no_interv[["POZO", "BATERIA", "CLASIFICACION", "POTENCIAL_BOPD", "ESTADO_MES"]],
+        no_interv[["POZO", "BATERIA", "CLASIFICACION", "ANIO_CONVERSION", "ESTADO", "ULTIMA_FECHA_HISTORICA"]],
         Inches(0.5),
         Inches(1.2),
         Inches(12.3),
@@ -972,96 +749,73 @@ def crear_ppt_resultados(periodo_txt, kpis, resumen_pozos, resumen_bateria, resu
 
 
 # ============================================================
-# APP
+# INTERFAZ
 # ============================================================
 
 st.title("🛢️ Dashboard operativo SWAB Lote X")
-st.caption("Carga tu Excel, selecciona año y mes, presiona ejecutar y revisa pozos intervenidos, no intervenidos, PRCR, PRAG, TS, CS y descargas.")
+st.caption("Sube solo el Excel principal. El sistema clasificará convertidos 2024, 2025, 2026 y el resto como Básica.")
 
-col_up1, col_up2 = st.columns(2)
+archivo = st.file_uploader(
+    "Sube tu Excel principal, por ejemplo Data Swab Python.xlsx",
+    type=["xlsx"]
+)
 
-with col_up1:
-    archivo_principal = st.file_uploader(
-        "Excel principal con hoja Datos de Swab",
-        type=["xlsx"],
-        key="archivo_principal"
-    )
-
-with col_up2:
-    archivo_base = st.file_uploader(
-        "Excel adicional opcional con convertidos y base, por ejemplo Producción por Swab.xlsx",
-        type=["xlsx"],
-        key="archivo_base"
-    )
-
-if archivo_principal is None:
-    st.info("Primero sube el Excel principal. Puede ser Data Swab Python.xlsx o Producción por Swab.xlsx.")
+if archivo is None:
+    st.info("Sube el Excel para habilitar los filtros.")
     st.stop()
 
-bytes_principal = archivo_principal.getvalue()
-bytes_base = archivo_base.getvalue() if archivo_base is not None else None
+bytes_excel = archivo.getvalue()
 
 try:
-    df = cargar_datos_swab(bytes_principal)
-
-    convertidos_principal = extraer_convertidos_desde_excel(bytes_principal)
-
-    if bytes_base is not None:
-        convertidos_base = extraer_convertidos_desde_excel(bytes_base)
-        base_pozos = cargar_base_pozos(bytes_base)
-        convertidos_excel = pd.concat([convertidos_principal, convertidos_base], ignore_index=True)
-        convertidos_excel = convertidos_excel.drop_duplicates("POZO_KEY")
-    else:
-        base_pozos = cargar_base_pozos(bytes_principal)
-        convertidos_excel = convertidos_principal
-
-    convertidos = combinar_convertidos(convertidos_excel, usar_respaldo=True)
-    universo = construir_universo(df, convertidos, base_pozos)
-
+    df, hoja_usada = cargar_excel_swab(bytes_excel)
 except Exception as e:
-    st.error(f"No se pudo procesar el Excel: {e}")
+    st.error(f"No se pudo cargar el Excel: {e}")
     st.stop()
+
+universo = construir_universo(df)
 
 fecha_min = df["FECHA"].min().date()
 fecha_max = df["FECHA"].max().date()
 
-anios_disponibles = sorted(df["ANIO"].dropna().unique().astype(int).tolist())
-baterias_disponibles = sorted([b for b in universo["BATERIA"].dropna().unique().tolist() if b != ""])
-tipos_disponibles = sorted([t for t in df["TIPO_SWAB"].dropna().unique().tolist() if t != ""])
-clases_disponibles = ["Básica", "Convertido 2024", "Convertido 2025", "Convertido 2026"]
+anios = sorted(df["ANIO"].dropna().unique().astype(int).tolist())
+baterias = sorted([x for x in universo["BATERIA"].dropna().unique().tolist() if x != ""])
+tipos = sorted([x for x in df["TIPO_SWAB"].dropna().unique().tolist() if x != ""])
+clases = ["Básica", "Convertido 2024", "Convertido 2025", "Convertido 2026"]
 
 with st.sidebar:
     st.header("Filtros")
 
     anio_sel = st.selectbox(
         "Año",
-        anios_disponibles,
-        index=len(anios_disponibles) - 1
+        anios,
+        index=len(anios) - 1
     )
 
-    mes_opciones = [0] + list(range(1, 13))
+    meses_opciones = [0] + list(range(1, 13))
+    mes_default = fecha_max.month if anio_sel == fecha_max.year else 0
+
     mes_sel = st.selectbox(
         "Mes",
-        mes_opciones,
-        format_func=lambda x: "Todo el año" if x == 0 else MESES[x],
-        index=mes_opciones.index(fecha_max.month) if anio_sel == fecha_max.year else 0
+        meses_opciones,
+        index=meses_opciones.index(mes_default),
+        format_func=lambda x: "Todo el año" if x == 0 else MESES[x]
     )
 
     baterias_sel = st.multiselect(
         "Batería",
-        baterias_disponibles,
+        baterias,
         default=[]
     )
 
     tipos_sel = st.multiselect(
         "Tipo de swab",
-        tipos_disponibles,
+        tipos,
         default=[]
     )
 
     clases_sel = st.multiselect(
         "Tipo de pozo",
-        clases_disponibles,
+        clases,
         default=[]
     )
 
@@ -1075,37 +829,35 @@ with st.sidebar:
 
     ejecutar = st.button("Ejecutar análisis", type="primary")
 
-if not ejecutar and "resultados_swab" not in st.session_state:
-    st.warning("Selecciona los filtros en la izquierda y presiona el botón Ejecutar análisis.")
+if not ejecutar and "swab_resultados" not in st.session_state:
+    st.warning("Selecciona los filtros en la izquierda y luego presiona Ejecutar análisis.")
     st.stop()
 
 if ejecutar:
-    universo_filtrado = aplicar_filtros_base(universo, baterias_sel, clases_sel)
-    data_periodo = filtrar_periodo(df, anio_sel, mes_sel, baterias_sel, tipos_sel, clases_sel, universo)
-    resumen_pozos = resumir_periodo(data_periodo, universo_filtrado)
-    resumen_bateria = resumen_por_bateria(data_periodo, universo_filtrado)
-    resumen_tipo = resumen_por_tipo(data_periodo)
-    resumen_clase = resumen_por_clase(resumen_pozos)
-    tendencia = tendencia_mensual(df, anio_sel, universo, baterias_sel, clases_sel, tipos_sel)
+    universo_filtrado = aplicar_filtros_universo(universo, baterias_sel, clases_sel)
+    data_periodo = filtrar_movimientos(df, anio_sel, mes_sel, baterias_sel, tipos_sel, clases_sel)
 
-    st.session_state["resultados_swab"] = {
+    resumen_pozos = resumir_pozos(data_periodo, universo_filtrado)
+    resumen_bateria = resumen_baterias(resumen_pozos)
+    resumen_tipo = resumen_tipo_swab(data_periodo)
+    resumen_clase = resumen_clasificacion(resumen_pozos)
+    tendencia = tendencia_mensual(df, anio_sel, baterias_sel, tipos_sel, clases_sel)
+
+    st.session_state["swab_resultados"] = {
         "anio": anio_sel,
         "mes": mes_sel,
-        "universo_filtrado": universo_filtrado,
+        "baterias_sel": baterias_sel,
+        "tipos_sel": tipos_sel,
+        "clases_sel": clases_sel,
         "data_periodo": data_periodo,
         "resumen_pozos": resumen_pozos,
         "resumen_bateria": resumen_bateria,
         "resumen_tipo": resumen_tipo,
         "resumen_clase": resumen_clase,
-        "tendencia": tendencia,
-        "filtros": {
-            "baterias": baterias_sel,
-            "tipos": tipos_sel,
-            "clases": clases_sel
-        }
+        "tendencia": tendencia
     }
 
-res = st.session_state["resultados_swab"]
+res = st.session_state["swab_resultados"]
 
 anio_sel = res["anio"]
 mes_sel = res["mes"]
@@ -1115,13 +867,12 @@ resumen_bateria = res["resumen_bateria"]
 resumen_tipo = res["resumen_tipo"]
 resumen_clase = res["resumen_clase"]
 tendencia = res["tendencia"]
-universo_filtrado = res["universo_filtrado"]
 
-periodo_txt = periodo_descripcion(anio_sel, mes_sel)
+periodo = periodo_texto(anio_sel, mes_sel)
 
-pozos_universo = int(resumen_pozos["POZO_KEY"].nunique())
-pozos_intervenidos = int((resumen_pozos["ESTADO_MES"] == "Intervenido").sum())
-pozos_no_intervenidos = int((resumen_pozos["ESTADO_MES"] == "No intervenido").sum())
+pozos_universo = resumen_pozos["POZO_KEY"].nunique()
+pozos_intervenidos = int((resumen_pozos["ESTADO"] == "Intervenido").sum())
+pozos_no_intervenidos = int((resumen_pozos["ESTADO"] == "No intervenido").sum())
 intervenciones = int(resumen_pozos["INTERVENCIONES"].sum())
 prcr_total = float(resumen_pozos["PRCR"].sum())
 prag_total = float(resumen_pozos["PRAG"].sum())
@@ -1137,31 +888,31 @@ kpis = {
     "oil_interv": oil_interv
 }
 
-st.subheader(f"Estatus operativo: {periodo_txt}")
+st.subheader(f"Estatus operativo: {periodo}")
 
-c1, c2, c3, c4, c5, c6 = st.columns(6)
+k1, k2, k3, k4, k5, k6 = st.columns(6)
 
-with c1:
+with k1:
     st.metric("Pozos universo", f"{pozos_universo:,}")
 
-with c2:
+with k2:
     st.metric("Pozos intervenidos", f"{pozos_intervenidos:,}")
 
-with c3:
+with k3:
     st.metric("Pozos no intervenidos", f"{pozos_no_intervenidos:,}")
 
-with c4:
+with k4:
     st.metric("Intervenciones", f"{intervenciones:,}")
 
-with c5:
+with k5:
     st.metric("PRCR", f"{prcr_total:,.2f}")
 
-with c6:
+with k6:
     st.metric("Oil / Interv.", f"{oil_interv:,.2f}")
 
 st.caption(
-    f"Rango de datos cargado: {fecha_min} al {fecha_max}. "
-    f"El análisis considera PRCR como petróleo recuperado y PRAG como agua recuperada."
+    f"Hoja usada: {hoja_usada}. Rango de datos cargado: {fecha_min} al {fecha_max}. "
+    f"PRCR = petróleo recuperado. PRAG = agua recuperada."
 )
 
 st.divider()
@@ -1172,48 +923,49 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "Baterías",
     "TS y CS",
     "Tendencia mensual",
-    "Descargas y validación"
+    "Descargas"
 ])
 
 
-with tab1:
-    st.subheader("Listado completo de pozos intervenidos y no intervenidos")
+columnas_pozos = [
+    "ESTADO",
+    "POZO",
+    "BATERIA",
+    "CLASIFICACION",
+    "ANIO_CONVERSION",
+    "TIPO_SWAB",
+    "UNIDADES",
+    "INTERVENCIONES",
+    "PRCR",
+    "PRAG",
+    "OIL_POR_INTERV",
+    "AGUA_POR_INTERV",
+    "PRIMERA_FECHA",
+    "ULTIMA_FECHA",
+    "ULTIMA_FECHA_HISTORICA"
+]
 
-    filtro_estado = st.radio(
-        "Ver",
-        ["Todos", "Solo intervenidos", "Solo no intervenidos"],
+columnas_pozos = [c for c in columnas_pozos if c in resumen_pozos.columns]
+
+
+with tab1:
+    st.subheader("Pozos intervenidos y no intervenidos")
+
+    estado_sel = st.radio(
+        "Estado",
+        ["Todos", "Intervenido", "No intervenido"],
         horizontal=True
     )
 
-    tabla_estado = resumen_pozos.copy()
+    tabla = resumen_pozos.copy()
 
-    if filtro_estado == "Solo intervenidos":
-        tabla_estado = tabla_estado[tabla_estado["ESTADO_MES"] == "Intervenido"]
-    elif filtro_estado == "Solo no intervenidos":
-        tabla_estado = tabla_estado[tabla_estado["ESTADO_MES"] == "No intervenido"]
+    if estado_sel != "Todos":
+        tabla = tabla[tabla["ESTADO"] == estado_sel]
 
-    columnas_listado = [
-        "ESTADO_MES",
-        "POZO",
-        "BATERIA",
-        "CLASIFICACION",
-        "ANIO_CONVERSION",
-        "TIPO_SWAB",
-        "UNIDADES",
-        "INTERVENCIONES",
-        "PRCR",
-        "PRAG",
-        "OIL_POR_INTERV",
-        "AGUA_POR_INTERV",
-        "POTENCIAL_BOPD",
-        "PRIMERA_FECHA",
-        "ULTIMA_FECHA"
-    ]
-
-    columnas_listado = [c for c in columnas_listado if c in tabla_estado.columns]
+    tabla = tabla.sort_values(["ESTADO", "CLASIFICACION", "BATERIA", "POZO"])
 
     st.dataframe(
-        formatear_tabla(tabla_estado[columnas_listado].sort_values(["ESTADO_MES", "CLASIFICACION", "BATERIA", "POZO"])),
+        formatear_tabla(tabla[columnas_pozos]),
         use_container_width=True,
         hide_index=True
     )
@@ -1221,53 +973,70 @@ with tab1:
     col_a, col_b = st.columns(2)
 
     with col_a:
-        st.subheader("Pozos por estado")
-        estado_plot = pd.DataFrame({
+        estado_df = pd.DataFrame({
             "Estado": ["Intervenido", "No intervenido"],
             "Pozos": [pozos_intervenidos, pozos_no_intervenidos]
         })
-        fig_estado = px.bar(estado_plot, x="Estado", y="Pozos", text="Pozos")
+
+        fig_estado = px.bar(
+            estado_df,
+            x="Estado",
+            y="Pozos",
+            text="Pozos",
+            title="Pozos intervenidos vs no intervenidos"
+        )
         st.plotly_chart(fig_estado, use_container_width=True)
 
     with col_b:
-        st.subheader("Resumen por tipo de pozo")
-        st.dataframe(
-            formatear_tabla(resumen_clase),
-            use_container_width=True,
-            hide_index=True
+        fig_clase = px.bar(
+            resumen_clase,
+            x="CLASIFICACION",
+            y="PRCR",
+            text="PRCR",
+            title="PRCR por clasificación"
         )
+        st.plotly_chart(fig_clase, use_container_width=True)
+
+    st.write("Resumen por clasificación")
+    st.dataframe(
+        formatear_tabla(resumen_clase),
+        use_container_width=True,
+        hide_index=True
+    )
 
 
 with tab2:
     st.subheader("Performance por pozo")
 
-    top_pozos = resumen_pozos[resumen_pozos["INTERVENCIONES"] > 0].sort_values("PRCR", ascending=False).head(top_n)
+    intervenidos = resumen_pozos[resumen_pozos["INTERVENCIONES"] > 0].copy()
 
-    if top_pozos.empty:
+    if intervenidos.empty:
         st.info("No hay pozos intervenidos para el periodo seleccionado.")
     else:
-        fig_top_pozos = px.bar(
-            top_pozos,
+        top_prcr = intervenidos.sort_values("PRCR", ascending=False).head(top_n)
+        fig_top = px.bar(
+            top_prcr,
             x="POZO",
             y="PRCR",
             color="CLASIFICACION",
-            hover_data=["BATERIA", "INTERVENCIONES", "PRAG", "OIL_POR_INTERV"],
+            hover_data=["BATERIA", "INTERVENCIONES", "PRAG", "OIL_POR_INTERV", "TIPO_SWAB"],
             title=f"Top {top_n} pozos por PRCR"
         )
-        st.plotly_chart(fig_top_pozos, use_container_width=True)
+        st.plotly_chart(fig_top, use_container_width=True)
 
-        fig_oil_interv = px.bar(
-            top_pozos.sort_values("OIL_POR_INTERV", ascending=False),
+        top_oil_interv = intervenidos.sort_values("OIL_POR_INTERV", ascending=False).head(top_n)
+        fig_oil = px.bar(
+            top_oil_interv,
             x="POZO",
             y="OIL_POR_INTERV",
             color="CLASIFICACION",
-            hover_data=["BATERIA", "INTERVENCIONES", "PRCR", "PRAG"],
+            hover_data=["BATERIA", "INTERVENCIONES", "PRCR", "PRAG", "TIPO_SWAB"],
             title=f"Top {top_n} pozos por oil/intervención"
         )
-        st.plotly_chart(fig_oil_interv, use_container_width=True)
+        st.plotly_chart(fig_oil, use_container_width=True)
 
         st.dataframe(
-            formatear_tabla(top_pozos[columnas_listado]),
+            formatear_tabla(intervenidos[columnas_pozos].sort_values("PRCR", ascending=False)),
             use_container_width=True,
             hide_index=True
         )
@@ -1277,11 +1046,11 @@ with tab3:
     st.subheader("Análisis por batería")
 
     if resumen_bateria.empty:
-        st.info("No hay datos de baterías para el filtro seleccionado.")
+        st.info("No hay información de batería para el filtro seleccionado.")
     else:
-        col_b1, col_b2 = st.columns(2)
+        c1, c2 = st.columns(2)
 
-        with col_b1:
+        with c1:
             top_bat_prcr = resumen_bateria.sort_values("PRCR", ascending=False).head(top_n)
             fig_bat_prcr = px.bar(
                 top_bat_prcr,
@@ -1292,7 +1061,7 @@ with tab3:
             )
             st.plotly_chart(fig_bat_prcr, use_container_width=True)
 
-        with col_b2:
+        with c2:
             top_bat_interv = resumen_bateria.sort_values("INTERVENCIONES", ascending=False).head(top_n)
             fig_bat_interv = px.bar(
                 top_bat_interv,
@@ -1314,25 +1083,27 @@ with tab4:
     st.subheader("Análisis por TS y CS")
 
     if resumen_tipo.empty:
-        st.info("No hay datos por tipo de swab para el filtro seleccionado.")
+        st.info("No hay información por tipo de swab para el filtro seleccionado.")
     else:
-        col_t1, col_t2 = st.columns(2)
+        c1, c2 = st.columns(2)
 
-        with col_t1:
+        with c1:
             fig_tipo_prcr = px.bar(
                 resumen_tipo,
                 x="TIPO_SWAB",
                 y="PRCR",
+                text="PRCR",
                 hover_data=["POZOS", "INTERVENCIONES", "PRAG", "OIL_POR_INTERV"],
                 title="PRCR por tipo de swab"
             )
             st.plotly_chart(fig_tipo_prcr, use_container_width=True)
 
-        with col_t2:
+        with c2:
             fig_tipo_interv = px.bar(
                 resumen_tipo,
                 x="TIPO_SWAB",
                 y="INTERVENCIONES",
+                text="INTERVENCIONES",
                 hover_data=["POZOS", "PRCR", "PRAG", "OIL_POR_INTERV"],
                 title="Intervenciones por tipo de swab"
             )
@@ -1349,25 +1120,30 @@ with tab5:
     st.subheader(f"Tendencia mensual {anio_sel}")
 
     if tendencia.empty:
-        st.info("No hay tendencia mensual para el filtro seleccionado.")
+        st.info("No hay tendencia mensual para los filtros seleccionados.")
     else:
+        orden_meses = [MESES[m] for m in sorted(tendencia["MES"].unique())]
+
         fig_tend = px.line(
             tendencia,
             x="MES_NOMBRE",
             y=["PRCR", "PRAG"],
             markers=True,
+            category_orders={"MES_NOMBRE": orden_meses},
             title=f"Tendencia mensual PRCR y PRAG en {anio_sel}"
         )
         st.plotly_chart(fig_tend, use_container_width=True)
 
-        fig_interv_mes = px.bar(
+        fig_interv = px.bar(
             tendencia,
             x="MES_NOMBRE",
             y="INTERVENCIONES",
+            text="INTERVENCIONES",
+            category_orders={"MES_NOMBRE": orden_meses},
             hover_data=["POZOS", "PRCR", "PRAG", "OIL_POR_INTERV"],
             title=f"Intervenciones mensuales en {anio_sel}"
         )
-        st.plotly_chart(fig_interv_mes, use_container_width=True)
+        st.plotly_chart(fig_interv, use_container_width=True)
 
         st.dataframe(
             formatear_tabla(tendencia),
@@ -1377,19 +1153,19 @@ with tab5:
 
 
 with tab6:
-    st.subheader("Descargar resultados")
+    st.subheader("Descargas")
 
-    tablas_descarga = {
-        "Resumen pozos": resumen_pozos[columnas_listado],
-        "Intervenidos": resumen_pozos[resumen_pozos["ESTADO_MES"] == "Intervenido"][columnas_listado],
-        "No intervenidos": resumen_pozos[resumen_pozos["ESTADO_MES"] == "No intervenido"][columnas_listado],
+    tablas = {
+        "Resumen pozos": resumen_pozos[columnas_pozos],
+        "Intervenidos": resumen_pozos[resumen_pozos["ESTADO"] == "Intervenido"][columnas_pozos],
+        "No intervenidos": resumen_pozos[resumen_pozos["ESTADO"] == "No intervenido"][columnas_pozos],
         "Resumen baterias": resumen_bateria,
         "Resumen TS CS": resumen_tipo,
         "Resumen clasificacion": resumen_clase,
         "Tendencia mensual": tendencia
     }
 
-    excel_bytes = crear_excel_resultados(tablas_descarga)
+    excel_bytes = crear_excel_descarga(tablas)
 
     st.download_button(
         "Descargar toda la información en Excel",
@@ -1398,8 +1174,8 @@ with tab6:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
-    ppt_bytes = crear_ppt_resultados(
-        periodo_txt=periodo_txt,
+    ppt_bytes = crear_ppt(
+        periodo=periodo,
         kpis=kpis,
         resumen_pozos=resumen_pozos,
         resumen_bateria=resumen_bateria,
@@ -1409,46 +1185,46 @@ with tab6:
     )
 
     st.download_button(
-        "Descargar presentación PPT editable",
+        "Descargar PPT editable",
         data=ppt_bytes,
         file_name=f"dashboard_swab_{anio_sel}_{mes_sel}.pptx",
         mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
     )
 
-    st.subheader("Validación del archivo cargado")
+    st.subheader("Validación")
 
-    val_df = pd.DataFrame({
+    validacion = pd.DataFrame({
         "Concepto": [
+            "Hoja usada",
             "Fecha mínima",
             "Fecha máxima",
             "Registros cargados",
             "Pozos históricos",
             "Baterías históricas",
-            "Pozos convertidos 2024",
-            "Pozos convertidos 2025",
-            "Pozos convertidos 2026",
-            "Pozos universo del análisis"
+            "Convertidos 2024 en data",
+            "Convertidos 2025 en data",
+            "Convertidos 2026 en data",
+            "Pozos básicos en data"
         ],
         "Valor": [
+            hoja_usada,
             str(fecha_min),
             str(fecha_max),
             f"{len(df):,}",
             f"{df['POZO_KEY'].nunique():,}",
             f"{df['BATERIA'].nunique():,}",
-            f"{(convertidos['ANIO_CONVERSION'] == 2024).sum():,}",
-            f"{(convertidos['ANIO_CONVERSION'] == 2025).sum():,}",
-            f"{(convertidos['ANIO_CONVERSION'] == 2026).sum():,}",
-            f"{pozos_universo:,}"
+            f"{(universo['CLASIFICACION'] == 'Convertido 2024').sum():,}",
+            f"{(universo['CLASIFICACION'] == 'Convertido 2025').sum():,}",
+            f"{(universo['CLASIFICACION'] == 'Convertido 2026').sum():,}",
+            f"{(universo['CLASIFICACION'] == 'Básica').sum():,}"
         ]
     })
 
-    st.dataframe(val_df, use_container_width=True, hide_index=True)
+    st.dataframe(validacion, use_container_width=True, hide_index=True)
 
     st.write("Muestra de datos limpios")
-    muestra_cols = ["FECHA", "POZO", "BATERIA", "UNIDAD", "TIPO_SWAB", "PRCR", "PRAG", "CLASIFICACION"]
-    muestra = df.merge(universo[["POZO_KEY", "CLASIFICACION"]], on="POZO_KEY", how="left")
     st.dataframe(
-        formatear_tabla(muestra[muestra_cols].head(50)),
+        formatear_tabla(df[["FECHA", "POZO", "BATERIA", "UNIDAD", "TIPO_SWAB", "PRCR", "PRAG", "CLASIFICACION"]].head(50)),
         use_container_width=True,
         hide_index=True
     )
