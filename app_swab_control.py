@@ -55,6 +55,38 @@ CONVERTIDOS = {
     ]
 }
 
+# ============================================================
+# POZOS CANDIDATOS PARA ATA
+# Estos 88 pozos se excluyen de todo el análisis SWAB.
+# No se consideran en producción, potencial, gráficos, tablas ni descargas.
+# ============================================================
+
+CANDIDATOS_ATA = [
+    'AA37', 'AA54', 'AA76', 'AA112',
+    'AA1577', 'AA1598', 'AA1599', 'AA1633',
+    'AA1661', 'AA1847', 'AA1930', 'AA5631',
+    'AA5707', 'AA5861', 'AA5926', 'AA5971',
+    'AA6192', 'AA6338', 'AA6342', 'AA6372',
+    'AA6423', 'AA6454', 'AA6517', 'AA6646',
+    'AA6762', 'AA7201', 'AA9154', 'AA9329',
+    'AA9364', 'AA10013', 'EA216', 'EA264',
+    'EA364', 'EA440', 'EA741', 'EA771',
+    'EA876', 'EA888', 'EA987', 'EA1054',
+    'EA1081', 'EA1161', 'EA1167', 'EA1233',
+    'EA1302', 'EA1506', 'EA1511', 'EA1513',
+    'EA1581', 'EA1630', 'EA1885', 'EA2067',
+    'EA2249', 'EA2254', 'EA2256', 'EA2304',
+    'EA2372', 'EA2389', 'EA2403', 'EA5682D',
+    'EA5694', 'EA5739', 'EA5766', 'EA5868',
+    'EA5874', 'EA5914', 'EA5921', 'EA5957',
+    'EA6130', 'EA6237', 'EA6918', 'EA7027',
+    'EA7158', 'EA8574', 'EA9242', 'EA9251',
+    'EA9287', 'EA9409', 'EA9417', 'EA9491',
+    'EA9668', 'EA9752', 'EA9779', 'EA11128',
+    'PB47', 'PB232', 'PE171', 'PT4-3',
+]
+
+
 MESES = {
     1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril",
     5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto",
@@ -71,6 +103,12 @@ LABELS_COLUMNAS = {
     "PRCR_BASE": "Producción de petróleo base",
     "PRCR_ACTUAL": "Producción de petróleo actual",
     "PRCR_BASE_NO_REALIZADO": "Producción de petróleo base no realizada",
+    "INTERV_MES_ANTERIOR_OBJETIVO": "Intervenciones mes anterior",
+    "PRCR_MES_ANTERIOR_OBJETIVO": "Producción de petróleo mes anterior",
+    "PRAG_MES_ANTERIOR_OBJETIVO": "Producción de agua mes anterior",
+    "VAR_PETROLEO_VS_MES_ANTERIOR": "Variación petróleo vs mes anterior",
+    "PRODUCCION_PETROLEO_DEJADA_MES_ANTERIOR": "Producción de petróleo dejada vs mes anterior",
+    "INTERVENCIONES_DEJADAS_MES_ANTERIOR": "Intervenciones dejadas vs mes anterior",
     "PRAG_BASE": "Producción de agua base",
     "PRAG_ACTUAL": "Producción de agua actual",
     "PRAG_BASE_NO_REALIZADO": "Producción de agua base no realizada",
@@ -84,6 +122,14 @@ LABELS_COLUMNAS = {
     "OIL_INTERV_ACTUAL": "Petróleo por intervención actual",
     "OIL_POR_INTERV_ULTIMO_MES": "Petróleo por intervención último mes",
     "POTENCIAL_BOPD": "Potencial estimado bopd",
+    "POTENCIAL_ULTIMO_MES_BOPD": "Potencial último mes activo bopd",
+    "MES_ANTERIOR_ULTIMO_ACTIVO": "Mes anterior al último mes activo",
+    "DIAS_MES_ANTERIOR": "Días mes anterior",
+    "PRCR_MES_ANTERIOR": "Producción de petróleo mes anterior",
+    "PRAG_MES_ANTERIOR": "Producción de agua mes anterior",
+    "INTERV_MES_ANTERIOR": "Intervenciones mes anterior",
+    "POTENCIAL_MES_ANTERIOR_BOPD": "Potencial mes anterior bopd",
+    "POTENCIAL_PROMEDIO_2_MESES_BOPD": "Potencial promedio 2 meses bopd",
     "INTERV_BASE": "Intervenciones base promedio",
     "INTERV_ACTUAL": "Intervenciones mes objetivo",
     "INTERV_BASE_NO_REALIZADAS": "Intervenciones base no realizadas",
@@ -124,6 +170,21 @@ def limpiar_pozo(valor):
     texto = str(valor).strip().upper()
     texto = re.sub(r"\s+", "", texto)
     return texto
+
+
+def candidatos_ata_keys():
+    return {limpiar_pozo(pozo) for pozo in CANDIDATOS_ATA}
+
+
+def excluir_candidatos_ata(df):
+    """
+    Excluye del análisis los 88 pozos candidatos para ATA.
+    Retorna la data filtrada y la data excluida para validación.
+    """
+    keys_ata = candidatos_ata_keys()
+    excluidos = df[df["POZO_KEY"].isin(keys_ata)].copy()
+    filtrado = df[~df["POZO_KEY"].isin(keys_ata)].copy()
+    return filtrado, excluidos
 
 
 def mostrar_pozo(valor):
@@ -255,6 +316,84 @@ def convertir_excel(tablas):
     return buffer.getvalue()
 
 
+def es_serie_numerica(valores):
+    """
+    Valida si una secuencia de valores es numérica.
+    Se usa para aplicar formato de 2 decimales solo cuando corresponde.
+    """
+    if valores is None:
+        return False
+
+    try:
+        serie = pd.Series(list(valores)).dropna()
+    except Exception:
+        return False
+
+    if serie.empty:
+        return False
+
+    convertida = pd.to_numeric(serie, errors="coerce")
+    return convertida.notna().mean() >= 0.80
+
+
+def aplicar_formato_2_decimales_fig(fig):
+    """
+    Aplica 2 decimales a textos, ejes y hover de los gráficos.
+    No cambia los cálculos, solo la visualización.
+    """
+    hay_y_numerico = False
+    hay_x_numerico = False
+
+    for trace in fig.data:
+        x_numerico = es_serie_numerica(getattr(trace, "x", None))
+        y_numerico = es_serie_numerica(getattr(trace, "y", None))
+
+        hay_x_numerico = hay_x_numerico or x_numerico
+        hay_y_numerico = hay_y_numerico or y_numerico
+
+        # Barras con etiquetas encima.
+        if getattr(trace, "type", "") == "bar" and getattr(trace, "text", None) is not None:
+            if es_serie_numerica(trace.text):
+                trace.texttemplate = "%{text:,.2f}"
+                trace.textposition = "outside"
+                trace.cliponaxis = False
+
+        # Pie o donut.
+        if getattr(trace, "type", "") == "pie":
+            trace.texttemplate = "%{percent:.2%}"
+            trace.hovertemplate = "%{label}<br>Valor: %{value:,.2f}<br>Porcentaje: %{percent:.2%}<extra></extra>"
+
+        # Hover de ejes principales.
+        ht = getattr(trace, "hovertemplate", None)
+        if ht:
+            if y_numerico:
+                ht = ht.replace("%{y}", "%{y:,.2f}")
+            if x_numerico:
+                ht = ht.replace("%{x}", "%{x:,.2f}")
+
+            # Hover de customdata. Plotly Express guarda ahí columnas adicionales.
+            customdata = getattr(trace, "customdata", None)
+            if customdata is not None:
+                try:
+                    matriz = np.array(customdata)
+                    if matriz.ndim == 2:
+                        for i in range(matriz.shape[1]):
+                            if es_serie_numerica(matriz[:, i]):
+                                ht = ht.replace(f"%{{customdata[{i}]}}", f"%{{customdata[{i}]:,.2f}}")
+                except Exception:
+                    pass
+
+            trace.hovertemplate = ht
+
+    if hay_y_numerico:
+        fig.update_yaxes(tickformat=",.2f")
+
+    if hay_x_numerico:
+        fig.update_xaxes(tickformat=",.2f")
+
+    return fig
+
+
 def aplicar_layout_fig(fig, titulo=None, altura=480):
     fig.update_layout(
         template=PLOT_TEMPLATE,
@@ -280,6 +419,8 @@ def aplicar_layout_fig(fig, titulo=None, altura=480):
         axis = getattr(fig.layout, axis_name, None)
         if axis and axis.title and axis.title.text in LABELS_COLUMNAS:
             axis.title.text = LABELS_COLUMNAS[axis.title.text]
+
+    fig = aplicar_formato_2_decimales_fig(fig)
 
     return fig
 
@@ -599,12 +740,21 @@ def calcular_servicio_y_desplazamiento(df, universo, anio_objetivo, mes_objetivo
         partes_base.append(df[(df["FECHA"] >= ini) & (df["FECHA"] <= fin)].copy())
     base = pd.concat(partes_base, ignore_index=True) if partes_base else df.iloc[0:0].copy()
 
+    # Mes anterior directo al mes objetivo.
+    # Esta comparación es independiente del promedio de N meses anteriores.
+    anio_mes_ant, mes_mes_ant = mes_anterior(anio_objetivo, mes_objetivo, 1)
+    mes_ant_ini = primer_dia_mes(anio_mes_ant, mes_mes_ant)
+    mes_ant_fin = ultimo_dia_mes(anio_mes_ant, mes_mes_ant)
+    mes_anterior_directo = df[(df["FECHA"] >= mes_ant_ini) & (df["FECHA"] <= mes_ant_fin)].copy()
+
     if baterias_sel:
         actual = actual[actual["BATERIA"].isin(baterias_sel)]
         base = base[base["BATERIA"].isin(baterias_sel)]
+        mes_anterior_directo = mes_anterior_directo[mes_anterior_directo["BATERIA"].isin(baterias_sel)]
     if tipos_sel:
         actual = actual[actual["TIPO_SWAB"].isin(tipos_sel)]
         base = base[base["TIPO_SWAB"].isin(tipos_sel)]
+        mes_anterior_directo = mes_anterior_directo[mes_anterior_directo["TIPO_SWAB"].isin(tipos_sel)]
 
     universo_eval = universo.copy()
     if baterias_sel:
@@ -614,13 +764,17 @@ def calcular_servicio_y_desplazamiento(df, universo, anio_objetivo, mes_objetivo
 
     res_actual = resumen_pozo_periodo(actual, "ACTUAL", divisor_meses=1)
     res_base = resumen_pozo_periodo(base, "BASE", divisor_meses=meses_base)
+    res_mes_anterior = resumen_pozo_periodo(mes_anterior_directo, "MES_ANTERIOR_OBJETIVO", divisor_meses=1)
 
     tabla = universo_eval.merge(res_base, on="POZO_KEY", how="left")
     tabla = tabla.merge(res_actual, on="POZO_KEY", how="left")
+    tabla = tabla.merge(res_mes_anterior, on="POZO_KEY", how="left")
 
     for col in [
         "INTERV_BASE", "PRCR_BASE", "PRAG_BASE", "OIL_INTERV_BASE",
-        "INTERV_ACTUAL", "PRCR_ACTUAL", "PRAG_ACTUAL", "OIL_INTERV_ACTUAL"
+        "INTERV_ACTUAL", "PRCR_ACTUAL", "PRAG_ACTUAL", "OIL_INTERV_ACTUAL",
+        "INTERV_MES_ANTERIOR_OBJETIVO", "PRCR_MES_ANTERIOR_OBJETIVO",
+        "PRAG_MES_ANTERIOR_OBJETIVO", "OIL_INTERV_MES_ANTERIOR_OBJETIVO"
     ]:
         if col not in tabla.columns:
             tabla[col] = 0
@@ -633,6 +787,20 @@ def calcular_servicio_y_desplazamiento(df, universo, anio_objetivo, mes_objetivo
     tabla["INTERV_BASE_NO_REALIZADAS"] = np.where(tabla["VAR_INTERV"] < 0, -tabla["VAR_INTERV"], 0)
     tabla["PRCR_BASE_NO_REALIZADO"] = np.where(tabla["VAR_PRCR"] < 0, -tabla["VAR_PRCR"], 0)
     tabla["PRAG_BASE_NO_REALIZADO"] = np.where(tabla["VAR_PRAG"] < 0, -tabla["VAR_PRAG"], 0)
+
+    # Comparación directa contra el mes anterior al mes objetivo.
+    # Responde: cuánto petróleo se dejó de producir respecto al mes anterior.
+    tabla["VAR_PETROLEO_VS_MES_ANTERIOR"] = tabla["PRCR_ACTUAL"] - tabla["PRCR_MES_ANTERIOR_OBJETIVO"]
+    tabla["PRODUCCION_PETROLEO_DEJADA_MES_ANTERIOR"] = np.where(
+        tabla["VAR_PETROLEO_VS_MES_ANTERIOR"] < 0,
+        -tabla["VAR_PETROLEO_VS_MES_ANTERIOR"],
+        0
+    )
+    tabla["INTERVENCIONES_DEJADAS_MES_ANTERIOR"] = np.where(
+        tabla["INTERV_ACTUAL"] < tabla["INTERV_MES_ANTERIOR_OBJETIVO"],
+        tabla["INTERV_MES_ANTERIOR_OBJETIVO"] - tabla["INTERV_ACTUAL"],
+        0
+    )
 
     def estado(row):
         if row["INTERV_BASE"] > 0 and row["INTERV_ACTUAL"] == 0:
@@ -670,17 +838,20 @@ def calcular_servicio_y_desplazamiento(df, universo, anio_objetivo, mes_objetivo
         "SIN ACTIVIDAD": 5
     }
     tabla["ORDEN"] = tabla["ESTADO_DESPLAZAMIENTO"].map(orden).fillna(9)
-    tabla = tabla.sort_values(["ORDEN", "PRCR_BASE_NO_REALIZADO", "INTERV_BASE_NO_REALIZADAS"], ascending=[True, False, False]).drop(columns="ORDEN")
+    tabla = tabla.sort_values(
+        ["ORDEN", "PRCR_BASE_NO_REALIZADO", "INTERV_BASE_NO_REALIZADAS"],
+        ascending=[True, False, False]
+    ).drop(columns="ORDEN")
 
     periodos = {
         "actual_ini": actual_ini,
         "actual_fin": actual_fin,
         "base_meses": meses_previos,
-        "meses_base": meses_base
+        "meses_base": meses_base,
+        "mes_anterior_directo": (anio_mes_ant, mes_mes_ant)
     }
 
     return tabla, periodos, actual, base
-
 
 def resumen_desplazamiento_por_bateria(tabla):
     if tabla.empty:
@@ -775,6 +946,14 @@ def construir_listado_convertidos(universo, data_mes_convertidos):
 # ============================================================
 
 def calcular_potencial_ultimo_mes_activo(df, universo, baterias_sel=None, clases_sel=None, tipos_sel=None):
+    """
+    Calcula el potencial de cada pozo con dos referencias:
+    1. Último mes activo con producción de petróleo > 0.
+    2. Mes calendario anterior al último mes activo.
+
+    Fórmula:
+    Potencial bopd = producción de petróleo del mes / días calendario del mes.
+    """
     data = df.copy()
     if baterias_sel:
         data = data[data["BATERIA"].isin(baterias_sel)]
@@ -785,15 +964,27 @@ def calcular_potencial_ultimo_mes_activo(df, universo, baterias_sel=None, clases
 
     data_prod = data[data["PRCR"] > 0].copy()
 
+    columnas_salida = [
+        "POZO_KEY", "POZO", "BATERIA", "CLASIFICACION", "ANIO_CONVERSION",
+        "ULTIMO_MES_ACTIVO", "DIAS_MES", "PRCR_ULTIMO_MES", "PRAG_ULTIMO_MES",
+        "INTERV_ULTIMO_MES", "OIL_POR_INTERV_ULTIMO_MES",
+        "POTENCIAL_ULTIMO_MES_BOPD", "POTENCIAL_BOPD", "ULTIMA_FECHA_CON_PRCR",
+        "MES_ANTERIOR_ULTIMO_ACTIVO", "DIAS_MES_ANTERIOR", "PRCR_MES_ANTERIOR",
+        "PRAG_MES_ANTERIOR", "INTERV_MES_ANTERIOR", "POTENCIAL_MES_ANTERIOR_BOPD",
+        "POTENCIAL_PROMEDIO_2_MESES_BOPD"
+    ]
+
     if data_prod.empty:
-        return pd.DataFrame(columns=[
-            "POZO_KEY", "POZO", "BATERIA", "CLASIFICACION", "ANIO_CONVERSION",
-            "ULTIMO_MES_ACTIVO", "DIAS_MES", "PRCR_ULTIMO_MES", "PRAG_ULTIMO_MES",
-            "INTERV_ULTIMO_MES", "OIL_POR_INTERV_ULTIMO_MES", "POTENCIAL_BOPD",
-            "ULTIMA_FECHA_CON_PRCR"
-        ])
+        salida = universo.copy()
+        for col in columnas_salida:
+            if col not in salida.columns:
+                salida[col] = 0
+        salida["ULTIMO_MES_ACTIVO"] = "Sin producción de petróleo > 0 en rango"
+        salida["MES_ANTERIOR_ULTIMO_ACTIVO"] = "Sin referencia"
+        return salida[columnas_salida]
 
     data_prod["ANIO_MES"] = data_prod["FECHA"].dt.to_period("M")
+
     mensual = (
         data_prod
         .groupby(["POZO_KEY", "ANIO_MES"], as_index=False)
@@ -807,12 +998,56 @@ def calcular_potencial_ultimo_mes_activo(df, universo, baterias_sel=None, clases
 
     idx = mensual.groupby("POZO_KEY")["ANIO_MES"].idxmax()
     ultimo = mensual.loc[idx].copy()
+
     ultimo["ANIO"] = ultimo["ANIO_MES"].dt.year
     ultimo["MES"] = ultimo["ANIO_MES"].dt.month
     ultimo["DIAS_MES"] = ultimo.apply(lambda r: dias_calendario_mes(r["ANIO"], r["MES"]), axis=1)
-    ultimo["POTENCIAL_BOPD"] = ultimo["PRCR_MES"] / ultimo["DIAS_MES"]
-    ultimo["OIL_POR_INTERV_ULTIMO_MES"] = np.where(ultimo["INTERV_MES"] > 0, ultimo["PRCR_MES"] / ultimo["INTERV_MES"], 0)
+    ultimo["POTENCIAL_ULTIMO_MES_BOPD"] = ultimo["PRCR_MES"] / ultimo["DIAS_MES"]
+    ultimo["POTENCIAL_BOPD"] = ultimo["POTENCIAL_ULTIMO_MES_BOPD"]
+    ultimo["OIL_POR_INTERV_ULTIMO_MES"] = np.where(
+        ultimo["INTERV_MES"] > 0,
+        ultimo["PRCR_MES"] / ultimo["INTERV_MES"],
+        0
+    )
     ultimo["ULTIMO_MES_ACTIVO"] = ultimo.apply(lambda r: periodo_mes_texto(r["ANIO"], r["MES"]), axis=1)
+
+    ultimo["ANIO_MES_ANTERIOR"] = ultimo["ANIO_MES"] - 1
+
+    mensual_anterior = mensual.rename(columns={
+        "ANIO_MES": "ANIO_MES_ANTERIOR",
+        "PRCR_MES": "PRCR_MES_ANTERIOR",
+        "PRAG_MES": "PRAG_MES_ANTERIOR",
+        "INTERV_MES": "INTERV_MES_ANTERIOR",
+        "ULTIMA_FECHA_CON_PRCR": "ULTIMA_FECHA_CON_PRCR_MES_ANTERIOR"
+    })
+
+    ultimo = ultimo.merge(
+        mensual_anterior[[
+            "POZO_KEY", "ANIO_MES_ANTERIOR", "PRCR_MES_ANTERIOR",
+            "PRAG_MES_ANTERIOR", "INTERV_MES_ANTERIOR"
+        ]],
+        on=["POZO_KEY", "ANIO_MES_ANTERIOR"],
+        how="left"
+    )
+
+    ultimo["ANIO_ANTERIOR"] = ultimo["ANIO_MES_ANTERIOR"].dt.year
+    ultimo["MES_ANTERIOR"] = ultimo["ANIO_MES_ANTERIOR"].dt.month
+    ultimo["DIAS_MES_ANTERIOR"] = ultimo.apply(
+        lambda r: dias_calendario_mes(r["ANIO_ANTERIOR"], r["MES_ANTERIOR"]), axis=1
+    )
+    ultimo["MES_ANTERIOR_ULTIMO_ACTIVO"] = ultimo.apply(
+        lambda r: periodo_mes_texto(r["ANIO_ANTERIOR"], r["MES_ANTERIOR"]), axis=1
+    )
+
+    for col in ["PRCR_MES_ANTERIOR", "PRAG_MES_ANTERIOR", "INTERV_MES_ANTERIOR"]:
+        ultimo[col] = ultimo[col].fillna(0)
+
+    ultimo["POTENCIAL_MES_ANTERIOR_BOPD"] = ultimo["PRCR_MES_ANTERIOR"] / ultimo["DIAS_MES_ANTERIOR"]
+    ultimo["POTENCIAL_PROMEDIO_2_MESES_BOPD"] = (
+        ultimo["PRCR_MES"] + ultimo["PRCR_MES_ANTERIOR"]
+    ) / (
+        ultimo["DIAS_MES"] + ultimo["DIAS_MES_ANTERIOR"]
+    )
 
     salida = universo.merge(ultimo, on="POZO_KEY", how="left")
     salida = salida.rename(columns={
@@ -821,19 +1056,22 @@ def calcular_potencial_ultimo_mes_activo(df, universo, baterias_sel=None, clases
         "INTERV_MES": "INTERV_ULTIMO_MES"
     })
 
-    columnas = [
-        "POZO_KEY", "POZO", "BATERIA", "CLASIFICACION", "ANIO_CONVERSION",
-        "ULTIMO_MES_ACTIVO", "DIAS_MES", "PRCR_ULTIMO_MES", "PRAG_ULTIMO_MES",
-        "INTERV_ULTIMO_MES", "OIL_POR_INTERV_ULTIMO_MES",
-        "POTENCIAL_BOPD", "ULTIMA_FECHA_CON_PRCR"
+    salida = salida[columnas_salida].copy()
+
+    numericas = [
+        "DIAS_MES", "PRCR_ULTIMO_MES", "PRAG_ULTIMO_MES", "INTERV_ULTIMO_MES",
+        "OIL_POR_INTERV_ULTIMO_MES", "POTENCIAL_ULTIMO_MES_BOPD", "POTENCIAL_BOPD",
+        "DIAS_MES_ANTERIOR", "PRCR_MES_ANTERIOR", "PRAG_MES_ANTERIOR",
+        "INTERV_MES_ANTERIOR", "POTENCIAL_MES_ANTERIOR_BOPD",
+        "POTENCIAL_PROMEDIO_2_MESES_BOPD"
     ]
-    salida = salida[columnas].copy()
-
-    for col in ["DIAS_MES", "PRCR_ULTIMO_MES", "PRAG_ULTIMO_MES", "INTERV_ULTIMO_MES", "OIL_POR_INTERV_ULTIMO_MES", "POTENCIAL_BOPD"]:
+    for col in numericas:
         salida[col] = salida[col].fillna(0)
-    salida["ULTIMO_MES_ACTIVO"] = salida["ULTIMO_MES_ACTIVO"].fillna("Sin producción de petróleo > 0 en rango")
 
-    return salida.sort_values("POTENCIAL_BOPD", ascending=False)
+    salida["ULTIMO_MES_ACTIVO"] = salida["ULTIMO_MES_ACTIVO"].fillna("Sin producción de petróleo > 0 en rango")
+    salida["MES_ANTERIOR_ULTIMO_ACTIVO"] = salida["MES_ANTERIOR_ULTIMO_ACTIVO"].fillna("Sin referencia")
+
+    return salida.sort_values("POTENCIAL_PROMEDIO_2_MESES_BOPD", ascending=False)
 
 
 # ============================================================
@@ -982,9 +1220,18 @@ if archivo is None:
 bytes_excel = archivo.getvalue()
 
 try:
-    df_raw, hoja_usada = cargar_excel_swab(bytes_excel)
+    df_raw_completo, hoja_usada = cargar_excel_swab(bytes_excel)
 except Exception as e:
     st.error(f"No se pudo cargar el Excel: {e}")
+    st.stop()
+
+# Se excluyen del análisis los 88 pozos candidatos para ATA.
+df_raw, df_ata_excluidos = excluir_candidatos_ata(df_raw_completo)
+pozos_ata_excluidos_en_data = df_ata_excluidos["POZO_KEY"].nunique() if not df_ata_excluidos.empty else 0
+registros_ata_excluidos = len(df_ata_excluidos)
+
+if df_raw.empty:
+    st.error("Después de excluir los pozos candidatos para ATA, no quedaron datos para analizar.")
     st.stop()
 
 fecha_min = df_raw["FECHA"].min().date()
@@ -998,7 +1245,7 @@ with st.sidebar:
     st.header("2. Módulo principal")
     modulo = st.radio(
         "Selecciona con qué trabajar",
-        ["Servicio y desplazamiento", "Potencial mensual de pozos", "Vista completa"],
+        ["Análisis de pozos dejados", "Potencial mensual de pozos", "Vista completa"],
         index=2
     )
 
@@ -1074,6 +1321,28 @@ if ejecutar:
         clases_sel=clases_sel if clases_sel else None,
         tipos_sel=tipos_sel
     )
+
+    columnas_potencial_desplazamiento = [
+        "POZO_KEY", "ULTIMO_MES_ACTIVO", "PRCR_ULTIMO_MES",
+        "POTENCIAL_ULTIMO_MES_BOPD", "MES_ANTERIOR_ULTIMO_ACTIVO",
+        "PRCR_MES_ANTERIOR", "POTENCIAL_MES_ANTERIOR_BOPD",
+        "POTENCIAL_PROMEDIO_2_MESES_BOPD"
+    ]
+    desplazamiento = desplazamiento.merge(
+        potencial[columnas_potencial_desplazamiento],
+        on="POZO_KEY",
+        how="left"
+    )
+
+    for col in [
+        "PRCR_ULTIMO_MES", "POTENCIAL_ULTIMO_MES_BOPD",
+        "PRCR_MES_ANTERIOR", "POTENCIAL_MES_ANTERIOR_BOPD",
+        "POTENCIAL_PROMEDIO_2_MESES_BOPD"
+    ]:
+        desplazamiento[col] = desplazamiento[col].fillna(0)
+
+    desplazamiento["ULTIMO_MES_ACTIVO"] = desplazamiento["ULTIMO_MES_ACTIVO"].fillna("Sin producción de petróleo > 0 en rango")
+    desplazamiento["MES_ANTERIOR_ULTIMO_ACTIVO"] = desplazamiento["MES_ANTERIOR_ULTIMO_ACTIVO"].fillna("Sin referencia")
 
     impacto_2026 = resumen_impacto_convertidos_2026(actual_mes, base_periodo, meses_base)
 
@@ -1168,13 +1437,14 @@ with k6:
 
 st.caption(
     f"Hoja usada: {hoja_usada}. Rango analizado: {fecha_inicio_analisis} al {fecha_fin_analisis}. "
-    f"Línea base: promedio mensual de {meses_base} mes(es) anteriores."
+    f"Línea base: promedio mensual de {meses_base} mes(es) anteriores. "
+    f"Se excluyeron {pozos_ata_excluidos_en_data} pozos candidatos para ATA, equivalentes a {registros_ata_excluidos:,} registros."
 )
 
 st.divider()
 
 tabs = st.tabs([
-    "Servicio y desplazamiento",
+    "Análisis de pozos dejados",
     "Impacto convertidos 2026",
     "Listado convertidos",
     "Potencial mensual",
@@ -1185,8 +1455,13 @@ tabs = st.tabs([
 
 
 with tabs[0]:
-    st.subheader("Pozos dejados de hacer o reducidos")
-    c1, c2, c3, c4, c5 = st.columns(5)
+    st.subheader("Análisis de pozos dejados de hacer o reducidos")
+    st.caption(
+        "Este bloque cruza los pozos dejados o reducidos con su potencial. "
+        "El potencial se calcula con la producción de petróleo mensual dividida entre los días calendario del mes."
+    )
+
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     with c1:
         st.metric("Pozos dejados", f"{len(dejados):,}")
     with c2:
@@ -1194,12 +1469,17 @@ with tabs[0]:
     with c3:
         st.metric("Interv. base no realizadas", f"{desplazamiento['INTERV_BASE_NO_REALIZADAS'].sum():,.2f}")
     with c4:
-        st.metric("Producción de petróleo base no realizada", f"{desplazamiento['PRCR_BASE_NO_REALIZADO'].sum():,.2f}")
+        st.metric("Petróleo base no realizado", f"{desplazamiento['PRCR_BASE_NO_REALIZADO'].sum():,.2f}")
     with c5:
-        st.metric("Producción de agua base no realizada", f"{desplazamiento['PRAG_BASE_NO_REALIZADO'].sum():,.2f}")
+        st.metric("Petróleo dejado vs mes anterior", f"{desplazamiento['PRODUCCION_PETROLEO_DEJADA_MES_ANTERIOR'].sum():,.2f}")
+    with c6:
+        st.metric("Potencial promedio 2 meses", f"{desplazamiento['POTENCIAL_PROMEDIO_2_MESES_BOPD'].sum():,.2f} bopd")
 
     meses_base_txt = ", ".join([periodo_mes_texto(a, m) for a, m in periodos_desplazamiento["base_meses"]])
-    st.info(f"Periodo objetivo: {periodo}. Base comparativa: promedio mensual de {meses_base} mes(es) anteriores: {meses_base_txt}.")
+    st.info(
+        f"Periodo objetivo: {periodo}. Base comparativa: promedio mensual de {meses_base} mes(es) anteriores: {meses_base_txt}. "
+        "El potencial se muestra con dos referencias: último mes activo y mes anterior al último mes activo."
+    )
 
     estado_sel = st.radio(
         "Estado de desplazamiento",
@@ -1213,31 +1493,83 @@ with tabs[0]:
 
     cols_desp = [
         "ESTADO_DESPLAZAMIENTO", "PRIORIDAD_REVISION", "POZO", "BATERIA",
-        "CLASIFICACION", "ANIO_CONVERSION", "INTERV_BASE", "INTERV_ACTUAL",
-        "INTERV_BASE_NO_REALIZADAS", "PRCR_BASE", "PRCR_ACTUAL",
-        "PRCR_BASE_NO_REALIZADO", "PRAG_BASE", "PRAG_ACTUAL",
+        "CLASIFICACION", "ANIO_CONVERSION",
+        "INTERV_BASE", "INTERV_ACTUAL", "INTERV_BASE_NO_REALIZADAS",
+        "PRCR_BASE", "PRCR_ACTUAL", "PRCR_BASE_NO_REALIZADO",
+        "PRCR_MES_ANTERIOR_OBJETIVO", "PRODUCCION_PETROLEO_DEJADA_MES_ANTERIOR",
+        "VAR_PETROLEO_VS_MES_ANTERIOR", "INTERV_MES_ANTERIOR_OBJETIVO",
+        "INTERVENCIONES_DEJADAS_MES_ANTERIOR",
+        "ULTIMO_MES_ACTIVO", "PRCR_ULTIMO_MES", "POTENCIAL_ULTIMO_MES_BOPD",
+        "MES_ANTERIOR_ULTIMO_ACTIVO", "PRCR_MES_ANTERIOR", "POTENCIAL_MES_ANTERIOR_BOPD",
+        "POTENCIAL_PROMEDIO_2_MESES_BOPD",
+        "PRAG_BASE", "PRAG_ACTUAL", "PRAG_BASE_NO_REALIZADO",
         "OIL_INTERV_BASE", "OIL_INTERV_ACTUAL", "ULTIMA_FECHA_HISTORICA"
     ]
     cols_desp = [c for c in cols_desp if c in tabla_desp.columns]
     st.dataframe(formatear_tabla(tabla_desp[cols_desp]), use_container_width=True, hide_index=True)
 
-    top_dej = desplazamiento[desplazamiento["ESTADO_DESPLAZAMIENTO"].isin(["DEJADO DE HACER", "REDUCIDO"])].sort_values("PRCR_BASE_NO_REALIZADO", ascending=False).head(top_n)
+    data_graf_pozos = desplazamiento[
+        desplazamiento["ESTADO_DESPLAZAMIENTO"].isin(["DEJADO DE HACER", "REDUCIDO"])
+    ].copy()
+    data_graf_pozos = data_graf_pozos.sort_values("PRCR_BASE_NO_REALIZADO", ascending=False).head(top_n)
 
     col_g1, col_g2 = st.columns(2)
     with col_g1:
-        if not top_dej.empty:
+        if not data_graf_pozos.empty:
             fig = px.bar(
-                top_dej,
+                data_graf_pozos,
                 x="POZO",
                 y="PRCR_BASE_NO_REALIZADO",
                 color="ESTADO_DESPLAZAMIENTO",
-                hover_data=["BATERIA", "CLASIFICACION", "INTERV_BASE", "INTERV_ACTUAL", "PRCR_BASE", "PRCR_ACTUAL"],
+                hover_data=[
+                    "BATERIA", "CLASIFICACION", "INTERV_BASE", "INTERV_ACTUAL",
+                    "PRCR_BASE", "PRCR_ACTUAL", "PRCR_MES_ANTERIOR_OBJETIVO",
+                    "PRODUCCION_PETROLEO_DEJADA_MES_ANTERIOR", "ULTIMO_MES_ACTIVO",
+                    "POTENCIAL_ULTIMO_MES_BOPD", "POTENCIAL_MES_ANTERIOR_BOPD",
+                    "POTENCIAL_PROMEDIO_2_MESES_BOPD"
+                ],
                 text="PRCR_BASE_NO_REALIZADO"
             )
-            fig = aplicar_layout_fig(fig, f"Top {top_n} pozos con Producción de petróleo base no realizada", 520)
+            fig.update_layout(uniformtext_minsize=8, uniformtext_mode="hide")
+            fig = aplicar_layout_fig(fig, f"Top {top_n} pozos dejados o reducidos por producción de petróleo base no realizada", 560)
             st.plotly_chart(fig, use_container_width=True)
 
     with col_g2:
+        data_graf_potencial = desplazamiento[
+            desplazamiento["ESTADO_DESPLAZAMIENTO"].isin(["DEJADO DE HACER", "REDUCIDO"])
+        ].sort_values("POTENCIAL_PROMEDIO_2_MESES_BOPD", ascending=False).head(top_n)
+
+        if not data_graf_potencial.empty:
+            fig_pot_desp = px.bar(
+                data_graf_potencial,
+                x="POZO",
+                y=["POTENCIAL_ULTIMO_MES_BOPD", "POTENCIAL_MES_ANTERIOR_BOPD"],
+                barmode="group",
+                hover_data=["BATERIA", "CLASIFICACION", "ULTIMO_MES_ACTIVO", "MES_ANTERIOR_ULTIMO_ACTIVO"]
+            )
+            fig_pot_desp = aplicar_layout_fig(fig_pot_desp, f"Top {top_n} pozos dejados o reducidos por potencial", 560)
+            st.plotly_chart(fig_pot_desp, use_container_width=True)
+
+    col_g3, col_g4 = st.columns(2)
+    with col_g3:
+        bubble = desplazamiento[desplazamiento["ESTADO_DESPLAZAMIENTO"].isin(["DEJADO DE HACER", "REDUCIDO"])].copy()
+        if not bubble.empty:
+            fig_bubble = px.scatter(
+                bubble,
+                x="POTENCIAL_PROMEDIO_2_MESES_BOPD",
+                y="PRCR_BASE_NO_REALIZADO",
+                size="INTERV_BASE_NO_REALIZADAS",
+                color="ESTADO_DESPLAZAMIENTO",
+                hover_name="POZO",
+                hover_data=[
+                    "BATERIA", "CLASIFICACION", "PRIORIDAD_REVISION", "INTERV_BASE",
+                    "INTERV_ACTUAL", "ULTIMO_MES_ACTIVO", "MES_ANTERIOR_ULTIMO_ACTIVO"
+                ]
+            )
+            fig_bubble = aplicar_layout_fig(fig_bubble, "Mapa de criticidad: potencial vs producción de petróleo no realizada", 560)
+            st.plotly_chart(fig_bubble, use_container_width=True)
+
+    with col_g4:
         if not res_desplazamiento_bateria.empty:
             fig_bat = px.bar(
                 res_desplazamiento_bateria.head(top_n),
@@ -1246,23 +1578,24 @@ with tabs[0]:
                 hover_data=["POZOS_DEJADOS", "POZOS_REDUCIDOS", "INTERV_BASE_NO_REALIZADAS"],
                 text="PRCR_BASE_NO_REALIZADO"
             )
-            fig_bat = aplicar_layout_fig(fig_bat, "Baterías con mayor Producción de petróleo base no realizada", 520)
+            fig_bat = aplicar_layout_fig(fig_bat, "Baterías con mayor producción de petróleo base no realizada", 560)
             st.plotly_chart(fig_bat, use_container_width=True)
 
-    bubble = desplazamiento[desplazamiento["ESTADO_DESPLAZAMIENTO"].isin(["DEJADO DE HACER", "REDUCIDO"])].copy()
-    if not bubble.empty:
-        fig_bubble = px.scatter(
-            bubble,
-            x="INTERV_BASE",
-            y="PRCR_BASE_NO_REALIZADO",
-            size="PRCR_BASE_NO_REALIZADO",
-            color="ESTADO_DESPLAZAMIENTO",
-            hover_name="POZO",
-            hover_data=["BATERIA", "CLASIFICACION", "PRIORIDAD_REVISION", "INTERV_ACTUAL", "PRCR_ACTUAL"],
-            title="Mapa de criticidad: frecuencia base vs producción de petróleo no realizada"
-        )
-        fig_bubble = aplicar_layout_fig(fig_bubble, "Mapa de criticidad: frecuencia base vs producción de petróleo no realizada", 560)
-        st.plotly_chart(fig_bubble, use_container_width=True)
+    data_graficos = {
+        "Graf top pozos petroleo": data_graf_pozos,
+        "Graf top potencial": data_graf_potencial,
+        "Graf burbuja criticidad": desplazamiento[
+            desplazamiento["ESTADO_DESPLAZAMIENTO"].isin(["DEJADO DE HACER", "REDUCIDO"])
+        ],
+        "Graf bateria petroleo": res_desplazamiento_bateria
+    }
+
+    st.download_button(
+        "Descargar data de las gráficas de pozos dejados",
+        data=convertir_excel(data_graficos),
+        file_name=f"data_graficas_pozos_dejados_{anio_objetivo}_{mes_objetivo}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
 
 with tabs[1]:
@@ -1379,56 +1712,76 @@ with tabs[2]:
 
 with tabs[3]:
     st.subheader("Potencial mensual por pozo")
-    st.caption("Criterio: último mes activo con PRCR > 0. Potencial BOPD = producción de petróleo del último mes activo / días calendario de ese mes.")
+    st.caption(
+        "Criterio: último mes activo con producción de petróleo > 0. "
+        "También se calcula el mes anterior al último mes activo para validar si el último mes fue poco representativo."
+    )
 
     cols_pot = [
         "POZO", "BATERIA", "CLASIFICACION", "ANIO_CONVERSION",
         "ULTIMO_MES_ACTIVO", "DIAS_MES", "PRCR_ULTIMO_MES",
-        "PRAG_ULTIMO_MES", "INTERV_ULTIMO_MES",
-        "OIL_POR_INTERV_ULTIMO_MES", "POTENCIAL_BOPD", "ULTIMA_FECHA_CON_PRCR"
+        "POTENCIAL_ULTIMO_MES_BOPD", "MES_ANTERIOR_ULTIMO_ACTIVO",
+        "DIAS_MES_ANTERIOR", "PRCR_MES_ANTERIOR",
+        "POTENCIAL_MES_ANTERIOR_BOPD", "POTENCIAL_PROMEDIO_2_MESES_BOPD",
+        "PRAG_ULTIMO_MES", "PRAG_MES_ANTERIOR", "INTERV_ULTIMO_MES",
+        "INTERV_MES_ANTERIOR", "ULTIMA_FECHA_CON_PRCR"
     ]
+    cols_pot = [c for c in cols_pot if c in potencial.columns]
     st.dataframe(formatear_tabla(potencial[cols_pot]), use_container_width=True, hide_index=True)
 
-    top_pot = potencial.sort_values("POTENCIAL_BOPD", ascending=False).head(top_n)
+    top_pot = potencial.sort_values("POTENCIAL_PROMEDIO_2_MESES_BOPD", ascending=False).head(top_n)
     if not top_pot.empty:
         fig_pot = px.bar(
             top_pot,
             x="POZO",
-            y="POTENCIAL_BOPD",
-            color="CLASIFICACION",
-            hover_data=["BATERIA", "ULTIMO_MES_ACTIVO", "PRCR_ULTIMO_MES", "INTERV_ULTIMO_MES"],
-            text="POTENCIAL_BOPD"
+            y=["POTENCIAL_ULTIMO_MES_BOPD", "POTENCIAL_MES_ANTERIOR_BOPD"],
+            barmode="group",
+            hover_data=["BATERIA", "CLASIFICACION", "ULTIMO_MES_ACTIVO", "MES_ANTERIOR_ULTIMO_ACTIVO"]
         )
-        fig_pot = aplicar_layout_fig(fig_pot, f"Top {top_n} pozos por potencial estimado BOPD", 530)
+        fig_pot = aplicar_layout_fig(fig_pot, f"Top {top_n} pozos por potencial estimado", 560)
         st.plotly_chart(fig_pot, use_container_width=True)
 
     st.write("Cruce: pozos dejados o reducidos con mayor potencial")
-    cruce = desplazamiento.merge(
-        potencial[["POZO_KEY", "ULTIMO_MES_ACTIVO", "POTENCIAL_BOPD", "PRCR_ULTIMO_MES"]],
-        on="POZO_KEY",
-        how="left"
-    )
-    cruce = cruce[cruce["ESTADO_DESPLAZAMIENTO"].isin(["DEJADO DE HACER", "REDUCIDO"])].sort_values("POTENCIAL_BOPD", ascending=False)
+    cruce = desplazamiento[
+        desplazamiento["ESTADO_DESPLAZAMIENTO"].isin(["DEJADO DE HACER", "REDUCIDO"])
+    ].sort_values("POTENCIAL_PROMEDIO_2_MESES_BOPD", ascending=False)
+
     cols_cruce = [
         "ESTADO_DESPLAZAMIENTO", "PRIORIDAD_REVISION", "POZO", "BATERIA",
-        "CLASIFICACION", "INTERV_BASE", "INTERV_ACTUAL",
-        "PRCR_BASE_NO_REALIZADO", "ULTIMO_MES_ACTIVO",
-        "PRCR_ULTIMO_MES", "POTENCIAL_BOPD"
+        "CLASIFICACION", "INTERV_BASE", "INTERV_ACTUAL", "PRCR_BASE_NO_REALIZADO",
+        "ULTIMO_MES_ACTIVO", "POTENCIAL_ULTIMO_MES_BOPD",
+        "MES_ANTERIOR_ULTIMO_ACTIVO", "POTENCIAL_MES_ANTERIOR_BOPD",
+        "POTENCIAL_PROMEDIO_2_MESES_BOPD"
     ]
+    cols_cruce = [c for c in cols_cruce if c in cruce.columns]
     st.dataframe(formatear_tabla(cruce[cols_cruce]), use_container_width=True, hide_index=True)
 
     if not cruce.empty:
         fig_cruce = px.scatter(
-            cruce.head(60),
-            x="POTENCIAL_BOPD",
+            cruce.head(80),
+            x="POTENCIAL_PROMEDIO_2_MESES_BOPD",
             y="PRCR_BASE_NO_REALIZADO",
             size="INTERV_BASE_NO_REALIZADAS",
             color="ESTADO_DESPLAZAMIENTO",
             hover_name="POZO",
-            hover_data=["BATERIA", "CLASIFICACION", "ULTIMO_MES_ACTIVO"]
+            hover_data=[
+                "BATERIA", "CLASIFICACION", "ULTIMO_MES_ACTIVO",
+                "MES_ANTERIOR_ULTIMO_ACTIVO", "POTENCIAL_ULTIMO_MES_BOPD",
+                "POTENCIAL_MES_ANTERIOR_BOPD"
+            ]
         )
-        fig_cruce = aplicar_layout_fig(fig_cruce, "Pozos dejados/reducidos: potencial vs Producción de petróleo base no realizada", 560)
+        fig_cruce = aplicar_layout_fig(fig_cruce, "Pozos dejados/reducidos: potencial promedio 2 meses vs producción de petróleo base no realizada", 580)
         st.plotly_chart(fig_cruce, use_container_width=True)
+
+    st.download_button(
+        "Descargar data de gráficas de potencial",
+        data=convertir_excel({
+            "Top potencial pozos": top_pot,
+            "Cruce dejados potencial": cruce
+        }),
+        file_name=f"data_graficas_potencial_{anio_objetivo}_{mes_objetivo}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
 
 with tabs[4]:
@@ -1526,28 +1879,39 @@ with tabs[6]:
 
     cols_desp = [
         "ESTADO_DESPLAZAMIENTO", "PRIORIDAD_REVISION", "POZO", "BATERIA",
-        "CLASIFICACION", "ANIO_CONVERSION", "INTERV_BASE", "INTERV_ACTUAL",
-        "INTERV_BASE_NO_REALIZADAS", "PRCR_BASE", "PRCR_ACTUAL",
-        "PRCR_BASE_NO_REALIZADO", "PRAG_BASE", "PRAG_ACTUAL",
-        "PRAG_BASE_NO_REALIZADO", "OIL_INTERV_BASE", "OIL_INTERV_ACTUAL",
-        "ULTIMA_FECHA_HISTORICA"
+        "CLASIFICACION", "ANIO_CONVERSION",
+        "INTERV_BASE", "INTERV_ACTUAL", "INTERV_BASE_NO_REALIZADAS",
+        "PRCR_BASE", "PRCR_ACTUAL", "PRCR_BASE_NO_REALIZADO",
+        "PRCR_MES_ANTERIOR_OBJETIVO", "PRODUCCION_PETROLEO_DEJADA_MES_ANTERIOR",
+        "VAR_PETROLEO_VS_MES_ANTERIOR", "INTERV_MES_ANTERIOR_OBJETIVO",
+        "INTERVENCIONES_DEJADAS_MES_ANTERIOR",
+        "ULTIMO_MES_ACTIVO", "PRCR_ULTIMO_MES", "POTENCIAL_ULTIMO_MES_BOPD",
+        "MES_ANTERIOR_ULTIMO_ACTIVO", "PRCR_MES_ANTERIOR", "POTENCIAL_MES_ANTERIOR_BOPD",
+        "POTENCIAL_PROMEDIO_2_MESES_BOPD",
+        "PRAG_BASE", "PRAG_ACTUAL", "PRAG_BASE_NO_REALIZADO",
+        "OIL_INTERV_BASE", "OIL_INTERV_ACTUAL", "ULTIMA_FECHA_HISTORICA"
     ]
     cols_desp = [c for c in cols_desp if c in desplazamiento.columns]
 
     cols_pot = [
         "POZO", "BATERIA", "CLASIFICACION", "ANIO_CONVERSION",
         "ULTIMO_MES_ACTIVO", "DIAS_MES", "PRCR_ULTIMO_MES",
-        "PRAG_ULTIMO_MES", "INTERV_ULTIMO_MES",
-        "OIL_POR_INTERV_ULTIMO_MES", "POTENCIAL_BOPD",
-        "ULTIMA_FECHA_CON_PRCR"
+        "POTENCIAL_ULTIMO_MES_BOPD", "MES_ANTERIOR_ULTIMO_ACTIVO",
+        "DIAS_MES_ANTERIOR", "PRCR_MES_ANTERIOR",
+        "POTENCIAL_MES_ANTERIOR_BOPD", "POTENCIAL_PROMEDIO_2_MESES_BOPD",
+        "PRAG_ULTIMO_MES", "PRAG_MES_ANTERIOR", "INTERV_ULTIMO_MES",
+        "INTERV_MES_ANTERIOR", "ULTIMA_FECHA_CON_PRCR"
     ]
 
     tablas = {
         "Resumen pozos": resumen_pozos[cols_pozos],
         "Listado convertidos": listado_convertidos,
-        "Servicio desplazamiento": desplazamiento[cols_desp],
+        "Analisis pozos dejados": desplazamiento[cols_desp],
+        "Pozos ATA excluidos": df_ata_excluidos,
         "Resumen desplaz bateria": res_desplazamiento_bateria,
         "Potencial pozos": potencial[cols_pot],
+        "Data graf dejados": desplazamiento[desplazamiento["ESTADO_DESPLAZAMIENTO"].isin(["DEJADO DE HACER", "REDUCIDO"])],
+        "Data graf potencial": potencial.sort_values("POTENCIAL_PROMEDIO_2_MESES_BOPD", ascending=False).head(top_n),
         "Resumen clasificacion": res_clase,
         "Resumen baterias": res_bateria,
         "Resumen TS CS": res_tipo,
@@ -1585,11 +1949,14 @@ with tabs[6]:
         "Concepto": [
             "Hoja usada", "Rango mínimo del Excel", "Rango máximo del Excel",
             "Rango seleccionado desde", "Rango seleccionado hasta", "Registros analizados",
-            "Pozos históricos en rango", "Baterías en rango", "Convertidos 2026 fijos", "PRCR", "PRAG"
+            "Pozos históricos en rango", "Baterías en rango", "Convertidos 2026 fijos",
+            "Pozos candidatos ATA excluidos", "Registros ATA excluidos", "PRCR", "PRAG"
         ],
         "Valor": [
             hoja_usada, str(fecha_min), str(fecha_max), str(fecha_inicio_analisis), str(fecha_fin_analisis),
-            f"{len(df):,}", f"{df['POZO_KEY'].nunique():,}", f"{df['BATERIA'].nunique():,}", "20", "Petróleo recuperado", "Agua recuperada"
+            f"{len(df):,}", f"{df['POZO_KEY'].nunique():,}", f"{df['BATERIA'].nunique():,}", "20",
+            f"{pozos_ata_excluidos_en_data:,} de 88", f"{registros_ata_excluidos:,}",
+            "Petróleo recuperado", "Agua recuperada"
         ]
     })
     st.dataframe(validacion, use_container_width=True, hide_index=True)
