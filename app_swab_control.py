@@ -63,6 +63,56 @@ MESES = {
 
 PLOT_TEMPLATE = "plotly_white"
 
+# Etiquetas visibles para tablas, gráficos, Excel y PPT.
+# Internamente se mantiene PRCR y PRAG porque así vienen en el Excel.
+LABELS_COLUMNAS = {
+    "PRCR": "Producción de petróleo",
+    "PRAG": "Producción de agua",
+    "PRCR_BASE": "Producción de petróleo base",
+    "PRCR_ACTUAL": "Producción de petróleo actual",
+    "PRCR_BASE_NO_REALIZADO": "Producción de petróleo base no realizada",
+    "PRAG_BASE": "Producción de agua base",
+    "PRAG_ACTUAL": "Producción de agua actual",
+    "PRAG_BASE_NO_REALIZADO": "Producción de agua base no realizada",
+    "VAR_PRCR": "Variación producción de petróleo",
+    "VAR_PRAG": "Variación producción de agua",
+    "PRCR_ULTIMO_MES": "Producción de petróleo último mes",
+    "PRAG_ULTIMO_MES": "Producción de agua último mes",
+    "ULTIMA_FECHA_CON_PRCR": "Última fecha con producción de petróleo",
+    "OIL_POR_INTERV": "Petróleo por intervención",
+    "OIL_INTERV_BASE": "Petróleo por intervención base",
+    "OIL_INTERV_ACTUAL": "Petróleo por intervención actual",
+    "OIL_POR_INTERV_ULTIMO_MES": "Petróleo por intervención último mes",
+    "POTENCIAL_BOPD": "Potencial estimado bopd",
+    "INTERV_BASE": "Intervenciones base promedio",
+    "INTERV_ACTUAL": "Intervenciones mes objetivo",
+    "INTERV_BASE_NO_REALIZADAS": "Intervenciones base no realizadas",
+    "PRIORIDAD_REVISION": "Prioridad de revisión",
+    "ESTADO_DESPLAZAMIENTO": "Estado de desplazamiento",
+    "ANIO_CONVERSION": "Año conversión",
+    "ULTIMO_MES_ACTIVO": "Último mes activo",
+    "DIAS_MES": "Días del mes",
+    "INTERV_ULTIMO_MES": "Intervenciones último mes",
+    "ULTIMA_FECHA_HISTORICA": "Última fecha histórica",
+    "POZOS_INTERVENIDOS": "Pozos intervenidos",
+    "POZOS_NO_INTERVENIDOS": "Pozos no intervenidos",
+    "POZOS_TOTAL": "Pozos total",
+    "POZOS_AFECTADOS": "Pozos afectados",
+    "POZOS_DEJADOS": "Pozos dejados",
+    "POZOS_REDUCIDOS": "Pozos reducidos",
+    "TIPO_SWAB": "Tipo de swab",
+    "CLASIFICACION": "Clasificación",
+    "BATERIA": "Batería",
+    "POZO": "Pozo",
+    "UNIDADES": "Unidades",
+    "INTERVENCIONES": "Intervenciones",
+    "MES_NOMBRE": "Mes"
+}
+
+
+def etiqueta(campo):
+    return LABELS_COLUMNAS.get(campo, campo)
+
 
 # ============================================================
 # UTILIDADES
@@ -177,6 +227,7 @@ def formatear_tabla(df):
     for col in salida.select_dtypes(include=["number"]).columns:
         salida[col] = salida[col].round(2)
 
+    salida = salida.rename(columns=LABELS_COLUMNAS)
     return salida
 
 
@@ -213,6 +264,23 @@ def aplicar_layout_fig(fig, titulo=None, altura=480):
         legend_title_text="",
         hovermode="closest"
     )
+
+    # Cambia nombres técnicos de columnas por etiquetas gerenciales.
+    for trace in fig.data:
+        if getattr(trace, "name", None) in LABELS_COLUMNAS:
+            trace.name = LABELS_COLUMNAS[trace.name]
+            trace.legendgroup = trace.name
+        if getattr(trace, "hovertemplate", None):
+            ht = trace.hovertemplate
+            for raw, nice in LABELS_COLUMNAS.items():
+                ht = ht.replace(raw, nice)
+            trace.hovertemplate = ht
+
+    for axis_name in ["xaxis", "yaxis"]:
+        axis = getattr(fig.layout, axis_name, None)
+        if axis and axis.title and axis.title.text in LABELS_COLUMNAS:
+            axis.title.text = LABELS_COLUMNAS[axis.title.text]
+
     return fig
 
 
@@ -235,7 +303,7 @@ def cargar_excel_swab(bytes_excel):
         raise ValueError(
             "Faltan columnas obligatorias: "
             + ", ".join(faltantes)
-            + ". El Excel debe tener FECHA, COD_POZ, COD_BAT, UNIDAD, TSER, PRCR y PRAG."
+            + ". El Excel debe tener FECHA, COD_POZ, COD_BAT, UNIDAD, TSER, PRCR y PRAG. PRCR se usa como producción de petróleo y PRAG como producción de agua."
         )
 
     df = df[requeridas].copy()
@@ -652,6 +720,56 @@ def resumen_impacto_convertidos_2026(actual, base, meses_base):
     }
 
 
+
+def construir_listado_convertidos(universo, data_mes_convertidos):
+    """
+    Lista fija de pozos convertidos 2024, 2025 y 2026.
+    Incluye el estado del mes objetivo solo como referencia operativa.
+    """
+    universo_conv = universo[universo["ANIO_CONVERSION"].isin([2024, 2025, 2026])].copy()
+
+    if data_mes_convertidos.empty:
+        resumen_mes = pd.DataFrame(columns=[
+            "POZO_KEY", "INTERVENCIONES_MES", "PRODUCCION_PETROLEO_MES", "PRODUCCION_AGUA_MES",
+            "TIPO_SWAB_MES", "ULTIMA_FECHA_MES"
+        ])
+    else:
+        resumen_mes = (
+            data_mes_convertidos
+            .groupby("POZO_KEY", as_index=False)
+            .agg(
+                INTERVENCIONES_MES=("FECHA", "count"),
+                PRODUCCION_PETROLEO_MES=("PRCR", "sum"),
+                PRODUCCION_AGUA_MES=("PRAG", "sum"),
+                TIPO_SWAB_MES=("TIPO_SWAB", lambda x: ", ".join(sorted(set([v for v in x if v])))),
+                ULTIMA_FECHA_MES=("FECHA", "max")
+            )
+        )
+
+    salida = universo_conv.merge(resumen_mes, on="POZO_KEY", how="left")
+
+    salida["INTERVENCIONES_MES"] = salida["INTERVENCIONES_MES"].fillna(0).astype(int)
+    salida["PRODUCCION_PETROLEO_MES"] = salida["PRODUCCION_PETROLEO_MES"].fillna(0)
+    salida["PRODUCCION_AGUA_MES"] = salida["PRODUCCION_AGUA_MES"].fillna(0)
+    salida["TIPO_SWAB_MES"] = salida["TIPO_SWAB_MES"].fillna("")
+    salida["ESTADO_MES"] = np.where(salida["INTERVENCIONES_MES"] > 0, "Intervenido", "No intervenido")
+
+    salida = salida.rename(columns={
+        "ANIO_CONVERSION": "AÑO_CONVERSION",
+        "CLASIFICACION": "TIPO_CONVERTIDO",
+        "ULTIMA_FECHA_HISTORICA": "ULTIMA_FECHA_HISTORICA"
+    })
+
+    columnas = [
+        "AÑO_CONVERSION", "TIPO_CONVERTIDO", "POZO", "BATERIA",
+        "ESTADO_MES", "INTERVENCIONES_MES", "PRODUCCION_PETROLEO_MES",
+        "PRODUCCION_AGUA_MES", "TIPO_SWAB_MES", "ULTIMA_FECHA_MES",
+        "ULTIMA_FECHA_HISTORICA"
+    ]
+
+    salida = salida[columnas].sort_values(["AÑO_CONVERSION", "POZO"])
+    return salida
+
 # ============================================================
 # POTENCIAL MENSUAL POR POZO
 # ============================================================
@@ -713,7 +831,7 @@ def calcular_potencial_ultimo_mes_activo(df, universo, baterias_sel=None, clases
 
     for col in ["DIAS_MES", "PRCR_ULTIMO_MES", "PRAG_ULTIMO_MES", "INTERV_ULTIMO_MES", "OIL_POR_INTERV_ULTIMO_MES", "POTENCIAL_BOPD"]:
         salida[col] = salida[col].fillna(0)
-    salida["ULTIMO_MES_ACTIVO"] = salida["ULTIMO_MES_ACTIVO"].fillna("Sin PRCR > 0 en rango")
+    salida["ULTIMO_MES_ACTIVO"] = salida["ULTIMO_MES_ACTIVO"].fillna("Sin producción de petróleo > 0 en rango")
 
     return salida.sort_values("POTENCIAL_BOPD", ascending=False)
 
@@ -781,8 +899,8 @@ def agregar_linea(slide, titulo, categorias, serie_prcr, serie_prag, x, y, w, h)
         return
     chart_data = CategoryChartData()
     chart_data.categories = categorias
-    chart_data.add_series("PRCR petróleo", [0 if pd.isna(v) else float(v) for v in serie_prcr])
-    chart_data.add_series("PRAG agua", [0 if pd.isna(v) else float(v) for v in serie_prag])
+    chart_data.add_series("Producción de petróleo", [0 if pd.isna(v) else float(v) for v in serie_prcr])
+    chart_data.add_series("Producción de agua", [0 if pd.isna(v) else float(v) for v in serie_prag])
     chart = slide.shapes.add_chart(XL_CHART_TYPE.LINE_MARKERS, x, y, w, h, chart_data).chart
     chart.has_legend = True
     chart.legend.position = XL_LEGEND_POSITION.BOTTOM
@@ -799,7 +917,7 @@ def crear_ppt(periodo, kpis, resumen_clase, resumen_bateria, resumen_tipo, tende
     slide = prs.slides.add_slide(blank)
     agregar_titulo(slide, "Dashboard SWAB Lote X", periodo)
     kpi_df = pd.DataFrame({
-        "Indicador": ["Pozos universo", "Pozos intervenidos", "Pozos no intervenidos", "Intervenciones", "PRCR petróleo", "PRAG agua", "Oil por intervención"],
+        "Indicador": ["Pozos universo", "Pozos intervenidos", "Pozos no intervenidos", "Intervenciones", "Producción de petróleo", "Producción de agua", "Oil por intervención"],
         "Valor": [kpis["pozos_universo"], kpis["pozos_intervenidos"], kpis["pozos_no_intervenidos"], kpis["intervenciones"], round(kpis["prcr"], 2), round(kpis["prag"], 2), round(kpis["oil_interv"], 2)]
     })
     agregar_tabla(slide, kpi_df, Inches(0.5), Inches(1.25), Inches(5.2), Inches(3.0), font_size=10)
@@ -809,7 +927,7 @@ def crear_ppt(periodo, kpis, resumen_clase, resumen_bateria, resumen_tipo, tende
     slide = prs.slides.add_slide(blank)
     agregar_titulo(slide, "Producción por clasificación", periodo)
     clase_plot = resumen_clase.sort_values("PRCR", ascending=False)
-    agregar_barras(slide, "PRCR petróleo por clasificación", clase_plot["CLASIFICACION"], clase_plot["PRCR"], Inches(0.5), Inches(1.2), Inches(6.4), Inches(5.4), "PRCR")
+    agregar_barras(slide, "Producción de petróleo por clasificación", clase_plot["CLASIFICACION"], clase_plot["PRCR"], Inches(0.5), Inches(1.2), Inches(6.4), Inches(5.4), "PRCR")
     agregar_tabla(slide, resumen_clase, Inches(7.1), Inches(1.2), Inches(5.7), Inches(5.4), font_size=7)
 
     slide = prs.slides.add_slide(blank)
@@ -820,13 +938,13 @@ def crear_ppt(periodo, kpis, resumen_clase, resumen_bateria, resumen_tipo, tende
 
     slide = prs.slides.add_slide(blank)
     agregar_titulo(slide, "TS y CS", periodo)
-    agregar_barras(slide, "PRCR petróleo por tipo de swab", resumen_tipo["TIPO_SWAB"], resumen_tipo["PRCR"], Inches(0.5), Inches(1.2), Inches(6.5), Inches(5.4), "PRCR")
+    agregar_barras(slide, "Producción de petróleo por tipo de swab", resumen_tipo["TIPO_SWAB"], resumen_tipo["PRCR"], Inches(0.5), Inches(1.2), Inches(6.5), Inches(5.4), "PRCR")
     agregar_tabla(slide, resumen_tipo, Inches(7.2), Inches(1.2), Inches(5.6), Inches(4.8), font_size=8)
 
     slide = prs.slides.add_slide(blank)
     agregar_titulo(slide, "Tendencia mensual", periodo)
     if not tendencia.empty:
-        agregar_linea(slide, "PRCR petróleo y PRAG agua por mes", tendencia["MES_NOMBRE"], tendencia["PRCR"], tendencia["PRAG"], Inches(0.7), Inches(1.2), Inches(12.0), Inches(5.5))
+        agregar_linea(slide, "Producción de petróleo y Producción de agua por mes", tendencia["MES_NOMBRE"], tendencia["PRCR"], tendencia["PRAG"], Inches(0.7), Inches(1.2), Inches(12.0), Inches(5.5))
 
     slide = prs.slides.add_slide(blank)
     agregar_titulo(slide, "Pozos dejados o reducidos", periodo)
@@ -853,7 +971,7 @@ def crear_ppt(periodo, kpis, resumen_clase, resumen_bateria, resumen_tipo, tende
 # ============================================================
 
 st.title("🛢️ SWAB Lote X - Servicio, desplazamiento y potencial")
-st.caption("PRCR = petróleo recuperado. PRAG = agua recuperada. Carga un solo Excel con la hoja Datos de Swab.")
+st.caption("Producción de petróleo = PRCR. Producción de agua = PRAG. Carga un solo Excel con la hoja Datos de Swab.")
 
 archivo = st.file_uploader("Sube el Excel principal", type=["xlsx"])
 
@@ -959,6 +1077,16 @@ if ejecutar:
 
     impacto_2026 = resumen_impacto_convertidos_2026(actual_mes, base_periodo, meses_base)
 
+    data_mes_convertidos = filtrar_movimientos_mes(
+        df,
+        anio_objetivo,
+        mes_objetivo,
+        baterias_sel,
+        tipos_sel,
+        ["Convertido 2024", "Convertido 2025", "Convertido 2026"]
+    )
+    listado_convertidos = construir_listado_convertidos(universo, data_mes_convertidos)
+
     st.session_state["swab_servicio_resultados"] = {
         "anio_objetivo": anio_objetivo,
         "mes_objetivo": mes_objetivo,
@@ -974,6 +1102,7 @@ if ejecutar:
         "periodos_desplazamiento": periodos_desplazamiento,
         "potencial": potencial,
         "impacto_2026": impacto_2026,
+        "listado_convertidos": listado_convertidos,
         "filtros": {
             "baterias_sel": baterias_sel,
             "tipos_sel": tipos_sel,
@@ -996,6 +1125,7 @@ desplazamiento = res["desplazamiento"]
 periodos_desplazamiento = res["periodos_desplazamiento"]
 potencial = res["potencial"]
 impacto_2026 = res["impacto_2026"]
+listado_convertidos = res.get("listado_convertidos", pd.DataFrame())
 
 periodo = periodo_mes_texto(anio_objetivo, mes_objetivo)
 pozos_universo = resumen_pozos["POZO_KEY"].nunique()
@@ -1032,9 +1162,9 @@ with k3:
 with k4:
     st.metric("Intervenciones", f"{intervenciones:,}")
 with k5:
-    st.metric("PRCR petróleo", f"{prcr_total:,.2f}")
+    st.metric("Producción de petróleo", f"{prcr_total:,.2f}")
 with k6:
-    st.metric("PRAG agua", f"{prag_total:,.2f}")
+    st.metric("Producción de agua", f"{prag_total:,.2f}")
 
 st.caption(
     f"Hoja usada: {hoja_usada}. Rango analizado: {fecha_inicio_analisis} al {fecha_fin_analisis}. "
@@ -1046,6 +1176,7 @@ st.divider()
 tabs = st.tabs([
     "Servicio y desplazamiento",
     "Impacto convertidos 2026",
+    "Listado convertidos",
     "Potencial mensual",
     "Pozos y baterías",
     "TS y CS",
@@ -1063,9 +1194,9 @@ with tabs[0]:
     with c3:
         st.metric("Interv. base no realizadas", f"{desplazamiento['INTERV_BASE_NO_REALIZADAS'].sum():,.2f}")
     with c4:
-        st.metric("PRCR base no realizado", f"{desplazamiento['PRCR_BASE_NO_REALIZADO'].sum():,.2f}")
+        st.metric("Producción de petróleo base no realizada", f"{desplazamiento['PRCR_BASE_NO_REALIZADO'].sum():,.2f}")
     with c5:
-        st.metric("PRAG base no realizado", f"{desplazamiento['PRAG_BASE_NO_REALIZADO'].sum():,.2f}")
+        st.metric("Producción de agua base no realizada", f"{desplazamiento['PRAG_BASE_NO_REALIZADO'].sum():,.2f}")
 
     meses_base_txt = ", ".join([periodo_mes_texto(a, m) for a, m in periodos_desplazamiento["base_meses"]])
     st.info(f"Periodo objetivo: {periodo}. Base comparativa: promedio mensual de {meses_base} mes(es) anteriores: {meses_base_txt}.")
@@ -1103,7 +1234,7 @@ with tabs[0]:
                 hover_data=["BATERIA", "CLASIFICACION", "INTERV_BASE", "INTERV_ACTUAL", "PRCR_BASE", "PRCR_ACTUAL"],
                 text="PRCR_BASE_NO_REALIZADO"
             )
-            fig = aplicar_layout_fig(fig, f"Top {top_n} pozos con PRCR base no realizado", 520)
+            fig = aplicar_layout_fig(fig, f"Top {top_n} pozos con Producción de petróleo base no realizada", 520)
             st.plotly_chart(fig, use_container_width=True)
 
     with col_g2:
@@ -1115,7 +1246,7 @@ with tabs[0]:
                 hover_data=["POZOS_DEJADOS", "POZOS_REDUCIDOS", "INTERV_BASE_NO_REALIZADAS"],
                 text="PRCR_BASE_NO_REALIZADO"
             )
-            fig_bat = aplicar_layout_fig(fig_bat, "Baterías con mayor PRCR base no realizado", 520)
+            fig_bat = aplicar_layout_fig(fig_bat, "Baterías con mayor Producción de petróleo base no realizada", 520)
             st.plotly_chart(fig_bat, use_container_width=True)
 
     bubble = desplazamiento[desplazamiento["ESTADO_DESPLAZAMIENTO"].isin(["DEJADO DE HACER", "REDUCIDO"])].copy()
@@ -1128,9 +1259,9 @@ with tabs[0]:
             color="ESTADO_DESPLAZAMIENTO",
             hover_name="POZO",
             hover_data=["BATERIA", "CLASIFICACION", "PRIORIDAD_REVISION", "INTERV_ACTUAL", "PRCR_ACTUAL"],
-            title="Mapa de criticidad: frecuencia base vs PRCR no realizado"
+            title="Mapa de criticidad: frecuencia base vs producción de petróleo no realizada"
         )
-        fig_bubble = aplicar_layout_fig(fig_bubble, "Mapa de criticidad: frecuencia base vs PRCR no realizado", 560)
+        fig_bubble = aplicar_layout_fig(fig_bubble, "Mapa de criticidad: frecuencia base vs producción de petróleo no realizada", 560)
         st.plotly_chart(fig_bubble, use_container_width=True)
 
 
@@ -1143,9 +1274,9 @@ with tabs[1]:
     with c2:
         st.metric("Interv. conv. 2026", f"{impacto_2026['INTERV_ACTUAL']:,}")
     with c3:
-        st.metric("PRCR conv. 2026", f"{impacto_2026['PRCR_ACTUAL']:,.2f}")
+        st.metric("Petróleo conv. 2026", f"{impacto_2026['PRCR_ACTUAL']:,.2f}")
     with c4:
-        st.metric("PRAG conv. 2026", f"{impacto_2026['PRAG_ACTUAL']:,.2f}")
+        st.metric("Agua conv. 2026", f"{impacto_2026['PRAG_ACTUAL']:,.2f}")
 
     col_i1, col_i2 = st.columns(2)
     with col_i1:
@@ -1156,7 +1287,7 @@ with tabs[1]:
             barmode="group",
             hover_data=["POZOS_INTERVENIDOS", "POZOS_NO_INTERVENIDOS", "INTERVENCIONES"]
         )
-        fig_clase = aplicar_layout_fig(fig_clase, "PRCR petróleo y PRAG agua por clasificación", 520)
+        fig_clase = aplicar_layout_fig(fig_clase, "Producción de petróleo y Producción de agua por clasificación", 520)
         st.plotly_chart(fig_clase, use_container_width=True)
 
     with col_i2:
@@ -1188,8 +1319,67 @@ with tabs[1]:
 
 
 with tabs[2]:
+    st.subheader("Listado de pozos convertidos 2024, 2025 y 2026")
+    st.caption(
+        "Listado fijo de pozos convertidos cargados en el código. "
+        "La columna Estado del mes muestra si el pozo tuvo intervención en el mes objetivo seleccionado."
+    )
+
+    if listado_convertidos.empty:
+        st.info("No se encontró listado de pozos convertidos.")
+    else:
+        anios_convertidos = sorted(listado_convertidos["AÑO_CONVERSION"].dropna().unique().astype(int).tolist())
+        anios_sel_convertidos = st.multiselect(
+            "Filtrar por año de conversión",
+            anios_convertidos,
+            default=anios_convertidos
+        )
+
+        tabla_conv = listado_convertidos.copy()
+        if anios_sel_convertidos:
+            tabla_conv = tabla_conv[tabla_conv["AÑO_CONVERSION"].isin(anios_sel_convertidos)]
+
+        resumen_conv = (
+            tabla_conv
+            .groupby(["AÑO_CONVERSION", "TIPO_CONVERTIDO"], as_index=False)
+            .agg(
+                POZOS=("POZO", "nunique"),
+                INTERVENIDOS_MES=("ESTADO_MES", lambda x: (x == "Intervenido").sum()),
+                NO_INTERVENIDOS_MES=("ESTADO_MES", lambda x: (x == "No intervenido").sum()),
+                INTERVENCIONES_MES=("INTERVENCIONES_MES", "sum"),
+                PRODUCCION_PETROLEO_MES=("PRODUCCION_PETROLEO_MES", "sum"),
+                PRODUCCION_AGUA_MES=("PRODUCCION_AGUA_MES", "sum")
+            )
+            .sort_values("AÑO_CONVERSION")
+        )
+
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.metric("Pozos convertidos listados", f"{tabla_conv['POZO'].nunique():,}")
+        with c2:
+            st.metric("Intervenidos en el mes", f"{(tabla_conv['ESTADO_MES'] == 'Intervenido').sum():,}")
+        with c3:
+            st.metric("No intervenidos en el mes", f"{(tabla_conv['ESTADO_MES'] == 'No intervenido').sum():,}")
+        with c4:
+            st.metric("Producción de petróleo mes", f"{tabla_conv['PRODUCCION_PETROLEO_MES'].sum():,.2f}")
+
+        st.write("Resumen por año de conversión")
+        st.dataframe(formatear_tabla(resumen_conv), use_container_width=True, hide_index=True)
+
+        st.write("Listado de pozos convertidos")
+        st.dataframe(formatear_tabla(tabla_conv), use_container_width=True, hide_index=True)
+
+        st.download_button(
+            "Descargar listado de convertidos en Excel",
+            data=convertir_excel({"Listado convertidos": tabla_conv, "Resumen convertidos": resumen_conv}),
+            file_name=f"listado_convertidos_{anio_objetivo}_{mes_objetivo}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+
+with tabs[3]:
     st.subheader("Potencial mensual por pozo")
-    st.caption("Criterio: último mes activo con PRCR > 0. Potencial BOPD = PRCR del último mes activo / días calendario de ese mes.")
+    st.caption("Criterio: último mes activo con PRCR > 0. Potencial BOPD = producción de petróleo del último mes activo / días calendario de ese mes.")
 
     cols_pot = [
         "POZO", "BATERIA", "CLASIFICACION", "ANIO_CONVERSION",
@@ -1237,11 +1427,11 @@ with tabs[2]:
             hover_name="POZO",
             hover_data=["BATERIA", "CLASIFICACION", "ULTIMO_MES_ACTIVO"]
         )
-        fig_cruce = aplicar_layout_fig(fig_cruce, "Pozos dejados/reducidos: potencial vs PRCR base no realizado", 560)
+        fig_cruce = aplicar_layout_fig(fig_cruce, "Pozos dejados/reducidos: potencial vs Producción de petróleo base no realizada", 560)
         st.plotly_chart(fig_cruce, use_container_width=True)
 
 
-with tabs[3]:
+with tabs[4]:
     st.subheader("Pozos y baterías")
     estado_pozo = st.radio("Estado", ["Todos", "Intervenido", "No intervenido"], horizontal=True)
     tabla_pozos = resumen_pozos.copy()
@@ -1267,7 +1457,7 @@ with tabs[3]:
                 hover_data=["POZOS_INTERVENIDOS", "POZOS_NO_INTERVENIDOS", "INTERVENCIONES", "PRAG"],
                 text="PRCR"
             )
-            fig_bat = aplicar_layout_fig(fig_bat, f"Top {top_n} baterías por PRCR petróleo", 520)
+            fig_bat = aplicar_layout_fig(fig_bat, f"Top {top_n} baterías por Producción de petróleo", 520)
             st.plotly_chart(fig_bat, use_container_width=True)
     with col_b2:
         if not res_bateria.empty:
@@ -1291,11 +1481,11 @@ with tabs[3]:
             markers=True,
             category_orders={"MES_NOMBRE": orden_meses}
         )
-        fig_tend = aplicar_layout_fig(fig_tend, f"Tendencia mensual PRCR petróleo y PRAG agua en {anio_objetivo}", 520)
+        fig_tend = aplicar_layout_fig(fig_tend, f"Tendencia mensual Producción de petróleo y Producción de agua en {anio_objetivo}", 520)
         st.plotly_chart(fig_tend, use_container_width=True)
 
 
-with tabs[4]:
+with tabs[5]:
     st.subheader("TS y CS")
     if res_tipo.empty:
         st.info("No hay información por tipo de swab.")
@@ -1309,7 +1499,7 @@ with tabs[4]:
                 barmode="group",
                 hover_data=["POZOS", "INTERVENCIONES", "OIL_POR_INTERV"]
             )
-            fig_tipo = aplicar_layout_fig(fig_tipo, "PRCR petróleo y PRAG agua por tipo de swab", 520)
+            fig_tipo = aplicar_layout_fig(fig_tipo, "Producción de petróleo y Producción de agua por tipo de swab", 520)
             st.plotly_chart(fig_tipo, use_container_width=True)
         with col_t2:
             fig_pie = px.pie(
@@ -1324,7 +1514,7 @@ with tabs[4]:
         st.dataframe(formatear_tabla(res_tipo), use_container_width=True, hide_index=True)
 
 
-with tabs[5]:
+with tabs[6]:
     st.subheader("Descargas")
     cols_pozos = [
         "ESTADO", "POZO", "BATERIA", "CLASIFICACION", "ANIO_CONVERSION",
@@ -1354,6 +1544,7 @@ with tabs[5]:
 
     tablas = {
         "Resumen pozos": resumen_pozos[cols_pozos],
+        "Listado convertidos": listado_convertidos,
         "Servicio desplazamiento": desplazamiento[cols_desp],
         "Resumen desplaz bateria": res_desplazamiento_bateria,
         "Potencial pozos": potencial[cols_pot],
