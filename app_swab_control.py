@@ -8,6 +8,12 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from pptx import Presentation
+from pptx.chart.data import CategoryChartData
+from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
+from pptx.util import Inches, Pt
+from pptx.dml.color import RGBColor
+
 
 st.set_page_config(
     page_title="SWAB Lote X - Servicio y Potencial",
@@ -114,6 +120,18 @@ LABELS = {
     "POTENCIAL_2_MES_ANTES_ULTIMA_INTERVENCION_BOPD": "Potencial 2 meses antes bopd",
 
     "POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD": "Potencial promedio 3 meses bopd",
+    "ULTIMA_FECHA_CON_PRODUCCION_PETROLEO": "Última fecha con producción de petróleo",
+    "PRODUCCION_PETROLEO_ULTIMA_FECHA": "Petróleo en última fecha con producción",
+    "PRODUCCION_AGUA_ULTIMA_FECHA": "Agua en última fecha con producción",
+    "FECHA_PRODUCCION_PETROLEO_ANTERIOR": "Fecha de producción de petróleo anterior",
+    "PRODUCCION_PETROLEO_FECHA_ANTERIOR": "Petróleo en fecha anterior",
+    "PRODUCCION_AGUA_FECHA_ANTERIOR": "Agua en fecha anterior",
+    "ULTIMO_MES_CON_PRODUCCION_PETROLEO": "Último mes con producción de petróleo",
+    "DIAS_ULTIMO_MES_CON_PRODUCCION": "Días último mes con producción",
+    "PRCR_ULTIMO_MES_CON_PRODUCCION": "Petróleo último mes con producción",
+    "PRAG_ULTIMO_MES_CON_PRODUCCION": "Agua último mes con producción",
+    "INTERV_ULTIMO_MES_CON_PRODUCCION": "Intervenciones último mes con producción",
+    "POTENCIAL_ULTIMO_MES_CON_PRODUCCION_BOPD": "Potencial último mes con producción bopd",
 
     "INTERVENCIONES": "Intervenciones",
     "PRCR": "Producción de petróleo",
@@ -257,6 +275,217 @@ def excel_descarga(tablas):
     return buffer.getvalue()
 
 
+
+# ============================================================
+# PPT EDITABLE
+# ============================================================
+
+PPT_AZUL = RGBColor(31, 78, 121)
+PPT_GRIS = RGBColor(89, 89, 89)
+PPT_ROJO = RGBColor(192, 0, 0)
+PPT_VERDE = RGBColor(112, 173, 71)
+
+
+def _ppt_text(slide, text, x, y, w, h, size=16, bold=False, color=None):
+    box = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
+    tf = box.text_frame
+    tf.clear()
+    p = tf.paragraphs[0]
+    run = p.add_run()
+    run.text = str(text)
+    run.font.size = Pt(size)
+    run.font.bold = bool(bold)
+    if color is not None:
+        run.font.color.rgb = color
+    return box
+
+
+def _ppt_title(slide, title, subtitle=""):
+    _ppt_text(slide, title, 0.45, 0.25, 12.4, 0.45, size=24, bold=True, color=PPT_AZUL)
+    if subtitle:
+        _ppt_text(slide, subtitle, 0.48, 0.78, 12.0, 0.3, size=10, color=PPT_GRIS)
+
+
+def _ppt_kpi(slide, label, value, x, y, w=2.0):
+    _ppt_text(slide, label, x, y, w, 0.25, size=8, color=PPT_GRIS)
+    _ppt_text(slide, value, x, y + 0.24, w, 0.42, size=18, bold=True, color=PPT_AZUL)
+
+
+def _ppt_table(slide, df, x, y, w, h, max_rows=12, font_size=6):
+    if df is None or df.empty:
+        _ppt_text(slide, "Sin datos", x, y, w, h, size=12, color=PPT_GRIS)
+        return
+
+    data = vista_tabla(df).head(max_rows).copy()
+    rows = len(data) + 1
+    cols = len(data.columns)
+    shape = slide.shapes.add_table(rows, cols, Inches(x), Inches(y), Inches(w), Inches(h))
+    table = shape.table
+
+    for j, col in enumerate(data.columns):
+        cell = table.cell(0, j)
+        cell.text = str(col)
+        cell.text_frame.paragraphs[0].font.size = Pt(font_size)
+        cell.text_frame.paragraphs[0].font.bold = True
+        cell.text_frame.paragraphs[0].font.color.rgb = PPT_AZUL
+
+    for i, (_, row) in enumerate(data.iterrows(), start=1):
+        for j, col in enumerate(data.columns):
+            cell = table.cell(i, j)
+            val = row[col]
+            if isinstance(val, float):
+                txt = f"{val:,.2f}"
+            else:
+                txt = "" if pd.isna(val) else str(val)
+            cell.text = txt
+            cell.text_frame.paragraphs[0].font.size = Pt(font_size)
+
+
+def _ppt_bar(slide, title, df, cat_col, val_col, x, y, w, h, series_name="Valor", max_rows=12):
+    if df is None or df.empty or cat_col not in df.columns or val_col not in df.columns:
+        _ppt_text(slide, "Sin datos para gráfico", x, y, w, h, size=12, color=PPT_GRIS)
+        return
+
+    data = df[[cat_col, val_col]].dropna().copy()
+    data[val_col] = pd.to_numeric(data[val_col], errors="coerce").fillna(0)
+    data = data.sort_values(val_col, ascending=False).head(max_rows)
+    if data.empty:
+        return
+
+    chart_data = CategoryChartData()
+    chart_data.categories = [str(x) for x in data[cat_col].tolist()]
+    chart_data.add_series(series_name, [float(x) for x in data[val_col].tolist()])
+    chart = slide.shapes.add_chart(
+        XL_CHART_TYPE.COLUMN_CLUSTERED,
+        Inches(x), Inches(y), Inches(w), Inches(h),
+        chart_data
+    ).chart
+    chart.chart_title.has_text_frame = True
+    chart.chart_title.text_frame.text = title
+    chart.has_legend = False
+    try:
+        chart.value_axis.tick_labels.number_format = '#,##0.00'
+    except Exception:
+        pass
+
+
+def _ppt_line(slide, title, df, cat_col, val_cols, x, y, w, h):
+    if df is None or df.empty or cat_col not in df.columns:
+        _ppt_text(slide, "Sin datos para tendencia", x, y, w, h, size=12, color=PPT_GRIS)
+        return
+
+    data = df.copy()
+    chart_data = CategoryChartData()
+    chart_data.categories = [str(x) for x in data[cat_col].tolist()]
+    for col in val_cols:
+        if col in data.columns:
+            chart_data.add_series(LABELS.get(col, col), [float(x) for x in pd.to_numeric(data[col], errors='coerce').fillna(0).tolist()])
+
+    chart = slide.shapes.add_chart(
+        XL_CHART_TYPE.LINE_MARKERS,
+        Inches(x), Inches(y), Inches(w), Inches(h),
+        chart_data
+    ).chart
+    chart.chart_title.has_text_frame = True
+    chart.chart_title.text_frame.text = title
+    chart.has_legend = True
+    chart.legend.position = XL_LEGEND_POSITION.BOTTOM
+    try:
+        chart.value_axis.tick_labels.number_format = '#,##0.00'
+    except Exception:
+        pass
+
+
+def _conv2026_detalle(list_conv, actual, potencial):
+    conv = list_conv[list_conv["CLASIFICACION"] == "Convertido 2026"].copy()
+    pot_cols = [
+        "POZO_KEY",
+        "ULTIMO_MES_INTERVENIDO",
+        "ULTIMA_FECHA_INTERVENCION",
+        "POTENCIAL_ULTIMO_MES_INTERVENIDO_BOPD",
+        "POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD",
+        "ULTIMA_FECHA_CON_PRODUCCION_PETROLEO",
+        "PRODUCCION_PETROLEO_ULTIMA_FECHA",
+        "FECHA_PRODUCCION_PETROLEO_ANTERIOR",
+        "PRODUCCION_PETROLEO_FECHA_ANTERIOR",
+        "ULTIMO_MES_CON_PRODUCCION_PETROLEO",
+        "POTENCIAL_ULTIMO_MES_CON_PRODUCCION_BOPD"
+    ]
+    pot_cols = [c for c in pot_cols if c in potencial.columns]
+    conv = conv.merge(potencial[pot_cols], on="POZO_KEY", how="left")
+    conv["ESTADO_CONVERTIDO_2026"] = np.where(conv["INTERVENCIONES"].fillna(0) > 0, "Intervenido", "No intervenido")
+    conv["PETROLEO_POR_INTERVENCION"] = np.where(
+        conv["INTERVENCIONES"].fillna(0) > 0,
+        conv["PRCR"].fillna(0) / conv["INTERVENCIONES"].fillna(0),
+        0
+    )
+    return conv.sort_values(["ESTADO_CONVERTIDO_2026", "PRCR"], ascending=[True, False])
+
+
+def crear_ppt_dashboard(periodo, kpis, res_clase, res_bat, res_tipo, res_tend, desp, pot, list_conv, actual, top_n=20):
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+    blank = prs.slide_layouts[6]
+
+    afectados = desp[desp["ESTADO_DESPLAZAMIENTO"].isin(["DEJADO DE HACER", "REDUCIDO"])].copy()
+    top_dej = afectados.sort_values("PRCR_BASE_NO_REALIZADO", ascending=False).head(top_n)
+    top_pot = pot.sort_values("POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD", ascending=False).head(top_n)
+    conv_det = _conv2026_detalle(list_conv, actual, pot)
+
+    # Slide 1
+    slide = prs.slides.add_slide(blank)
+    _ppt_title(slide, "SWAB Lote X: resumen ejecutivo", f"Periodo objetivo: {periodo}")
+    _ppt_kpi(slide, "Pozos universo", f"{kpis['pozos_universo']:,}", 0.55, 1.25)
+    _ppt_kpi(slide, "Intervenidos", f"{kpis['pozos_interv']:,}", 2.55, 1.25)
+    _ppt_kpi(slide, "No intervenidos", f"{kpis['pozos_no']:,}", 4.55, 1.25)
+    _ppt_kpi(slide, "Intervenciones", f"{kpis['interv']:,}", 6.55, 1.25)
+    _ppt_kpi(slide, "Petróleo", f"{kpis['petroleo']:,.2f}", 8.55, 1.25)
+    _ppt_kpi(slide, "Agua", f"{kpis['agua']:,.2f}", 10.55, 1.25)
+    _ppt_bar(slide, "Producción de petróleo por clasificación", res_clase, "CLASIFICACION", "PRCR", 0.7, 2.25, 5.7, 4.5, "Petróleo")
+    _ppt_bar(slide, "Top baterías por petróleo", res_bat, "BATERIA", "PRCR", 6.85, 2.25, 5.7, 4.5, "Petróleo")
+
+    # Slide 2
+    slide = prs.slides.add_slide(blank)
+    _ppt_title(slide, "Impacto de convertidos 2026", "Detalle del grupo priorizado de 20 pozos")
+    conv_interv = int(conv_det["INTERVENCIONES"].fillna(0).gt(0).sum()) if not conv_det.empty else 0
+    _ppt_kpi(slide, "Convertidos intervenidos", f"{conv_interv} de 20", 0.55, 1.1)
+    _ppt_kpi(slide, "Intervenciones", f"{conv_det['INTERVENCIONES'].sum():,.0f}" if not conv_det.empty else "0", 2.8, 1.1)
+    _ppt_kpi(slide, "Petróleo", f"{conv_det['PRCR'].sum():,.2f}" if not conv_det.empty else "0.00", 5.05, 1.1)
+    _ppt_kpi(slide, "Agua", f"{conv_det['PRAG'].sum():,.2f}" if not conv_det.empty else "0.00", 7.3, 1.1)
+    _ppt_kpi(slide, "Petróleo/interv.", f"{(conv_det['PRCR'].sum()/conv_det['INTERVENCIONES'].sum()):,.2f}" if not conv_det.empty and conv_det['INTERVENCIONES'].sum() > 0 else "0.00", 9.55, 1.1)
+    _ppt_bar(slide, "Top convertidos 2026 por petróleo", conv_det, "POZO", "PRCR", 0.6, 2.15, 6.1, 4.7, "Petróleo")
+    cols = ["POZO", "BATERIA", "ESTADO_CONVERTIDO_2026", "INTERVENCIONES", "PRCR", "PRAG", "POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD"]
+    cols = [c for c in cols if c in conv_det.columns]
+    _ppt_table(slide, conv_det[cols], 6.95, 2.15, 5.8, 4.7, max_rows=12, font_size=6)
+
+    # Slide 3
+    slide = prs.slides.add_slide(blank)
+    _ppt_title(slide, "Pozos dejados o reducidos", "Candidatos desplazados por priorización operativa")
+    _ppt_bar(slide, "Top pozos por petróleo base no realizado", top_dej, "POZO", "PRCR_BASE_NO_REALIZADO", 0.6, 1.25, 6.2, 5.6, "Petróleo base no realizado")
+    cols = ["ESTADO_DESPLAZAMIENTO", "POZO", "BATERIA", "CLASIFICACION", "INTERV_BASE", "INTERV_ACTUAL", "PRCR_BASE_NO_REALIZADO", "POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD"]
+    cols = [c for c in cols if c in top_dej.columns]
+    _ppt_table(slide, top_dej[cols], 7.0, 1.25, 5.8, 5.6, max_rows=13, font_size=6)
+
+    # Slide 4
+    slide = prs.slides.add_slide(blank)
+    _ppt_title(slide, "Potencial y trazabilidad de producción", "Potencial calculado con último mes intervenido y meses previos")
+    _ppt_bar(slide, "Top potencial promedio 3 meses", top_pot, "POZO", "POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD", 0.6, 1.25, 6.2, 5.6, "BOPD")
+    cols = ["POZO", "BATERIA", "ULTIMO_MES_INTERVENIDO", "PRCR_ULTIMO_MES_INTERVENIDO", "POTENCIAL_ULTIMO_MES_INTERVENIDO_BOPD", "ULTIMA_FECHA_CON_PRODUCCION_PETROLEO", "PRODUCCION_PETROLEO_ULTIMA_FECHA"]
+    cols = [c for c in cols if c in top_pot.columns]
+    _ppt_table(slide, top_pot[cols], 7.0, 1.25, 5.8, 5.6, max_rows=13, font_size=6)
+
+    # Slide 5
+    slide = prs.slides.add_slide(blank)
+    _ppt_title(slide, "Tendencia mensual y tipo de swab", "Producción e intervenciones por periodo")
+    _ppt_line(slide, "Tendencia mensual petróleo y agua", res_tend, "MES_NOMBRE", ["PRCR", "PRAG"], 0.65, 1.25, 6.0, 5.4)
+    _ppt_bar(slide, "Intervenciones por tipo de swab", res_tipo, "TIPO_SWAB", "INTERVENCIONES", 7.0, 1.25, 5.5, 5.4, "Intervenciones")
+
+    buffer = io.BytesIO()
+    prs.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
 def aplicar_layout(fig, titulo, altura=520):
     fig.update_layout(
         template="plotly_white",
@@ -379,15 +608,14 @@ def resumen_pozo_periodo(data, sufijo, divisor=1):
 
 def calcular_potencial(df, universo, baterias=None, tipos=None, clases=None):
     """
-    Calcula potencial usando como referencia la última intervención del pozo,
-    no necesariamente el último mes con producción de petróleo.
+    Calcula potencial usando como referencia la última intervención del pozo.
 
-    Para cada pozo calcula:
-    1. Potencial del último mes intervenido
-    2. Potencial de 1 mes antes de la última intervención
-    3. Potencial de 2 meses antes de la última intervención
+    Además agrega trazabilidad de producción real de petróleo:
+    1. Última fecha con producción de petróleo mayor a cero
+    2. Fecha de producción de petróleo anterior
+    3. Último mes con producción de petróleo y su potencial BOPD
 
-    Fórmula:
+    Fórmula de potencial:
     Potencial BOPD = producción de petróleo del mes / días calendario del mes
     """
     data = df.copy()
@@ -399,14 +627,31 @@ def calcular_potencial(df, universo, baterias=None, tipos=None, clases=None):
     if clases:
         data = data[data["CLASIFICACION"].isin(clases)]
 
+    columnas_base_sin_data = {
+        "ULTIMO_MES_INTERVENIDO": "Sin intervención",
+        "ULTIMA_FECHA_INTERVENCION": pd.NaT,
+        "POTENCIAL_ULTIMO_MES_INTERVENIDO_BOPD": 0.0,
+        "POTENCIAL_1_MES_ANTES_ULTIMA_INTERVENCION_BOPD": 0.0,
+        "POTENCIAL_2_MES_ANTES_ULTIMA_INTERVENCION_BOPD": 0.0,
+        "POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD": 0.0,
+        "ULTIMA_FECHA_CON_PRODUCCION_PETROLEO": pd.NaT,
+        "PRODUCCION_PETROLEO_ULTIMA_FECHA": 0.0,
+        "PRODUCCION_AGUA_ULTIMA_FECHA": 0.0,
+        "FECHA_PRODUCCION_PETROLEO_ANTERIOR": pd.NaT,
+        "PRODUCCION_PETROLEO_FECHA_ANTERIOR": 0.0,
+        "PRODUCCION_AGUA_FECHA_ANTERIOR": 0.0,
+        "ULTIMO_MES_CON_PRODUCCION_PETROLEO": "Sin producción",
+        "DIAS_ULTIMO_MES_CON_PRODUCCION": 0,
+        "PRCR_ULTIMO_MES_CON_PRODUCCION": 0.0,
+        "PRAG_ULTIMO_MES_CON_PRODUCCION": 0.0,
+        "INTERV_ULTIMO_MES_CON_PRODUCCION": 0,
+        "POTENCIAL_ULTIMO_MES_CON_PRODUCCION_BOPD": 0.0
+    }
+
     if data.empty:
         out = universo.copy()
-        out["ULTIMO_MES_INTERVENIDO"] = "Sin intervención"
-        out["ULTIMA_FECHA_INTERVENCION"] = pd.NaT
-        out["POTENCIAL_ULTIMO_MES_INTERVENIDO_BOPD"] = 0.0
-        out["POTENCIAL_1_MES_ANTES_ULTIMA_INTERVENCION_BOPD"] = 0.0
-        out["POTENCIAL_2_MES_ANTES_ULTIMA_INTERVENCION_BOPD"] = 0.0
-        out["POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD"] = 0.0
+        for col, valor in columnas_base_sin_data.items():
+            out[col] = valor
         return out
 
     data["ANIO_MES"] = data["FECHA"].dt.to_period("M")
@@ -484,8 +729,6 @@ def calcular_potencial(df, universo, baterias=None, tipos=None, clases=None):
                 registro[f"INTERV_{etiqueta}"] = interv_mes
                 registro[f"POTENCIAL_{etiqueta}_BOPD"] = potencial
 
-        # Promedio simple de los 3 meses revisados: último mes intervenido,
-        # 1 mes antes y 2 meses antes.
         registro["POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD"] = (
             registro["POTENCIAL_ULTIMO_MES_INTERVENIDO_BOPD"] +
             registro["POTENCIAL_1_MES_ANTES_ULTIMA_INTERVENCION_BOPD"] +
@@ -494,18 +737,137 @@ def calcular_potencial(df, universo, baterias=None, tipos=None, clases=None):
 
         registros.append(registro)
 
-    potencial = pd.DataFrame(registros)
-    out = universo.merge(potencial, on="POZO_KEY", how="left")
+    potencial_interv = pd.DataFrame(registros)
+
+    # Última fecha con producción real de petróleo y la fecha productiva anterior.
+    prod_eventos = data[data["PRCR"] > 0].sort_values(["POZO_KEY", "FECHA"]).copy()
+
+    if not prod_eventos.empty:
+        ult_prod = (
+            prod_eventos.groupby("POZO_KEY", as_index=False)
+            .tail(1)[["POZO_KEY", "FECHA", "PRCR", "PRAG"]]
+            .rename(columns={
+                "FECHA": "ULTIMA_FECHA_CON_PRODUCCION_PETROLEO",
+                "PRCR": "PRODUCCION_PETROLEO_ULTIMA_FECHA",
+                "PRAG": "PRODUCCION_AGUA_ULTIMA_FECHA"
+            })
+        )
+
+        anteriores = []
+        for pozo_key, grupo in prod_eventos.groupby("POZO_KEY"):
+            if len(grupo) >= 2:
+                fila = grupo.iloc[-2]
+                anteriores.append({
+                    "POZO_KEY": pozo_key,
+                    "FECHA_PRODUCCION_PETROLEO_ANTERIOR": fila["FECHA"],
+                    "PRODUCCION_PETROLEO_FECHA_ANTERIOR": float(fila["PRCR"]),
+                    "PRODUCCION_AGUA_FECHA_ANTERIOR": float(fila["PRAG"])
+                })
+
+        prod_ant = pd.DataFrame(anteriores)
+
+        if prod_ant.empty:
+            prod_ant = pd.DataFrame(columns=[
+                "POZO_KEY",
+                "FECHA_PRODUCCION_PETROLEO_ANTERIOR",
+                "PRODUCCION_PETROLEO_FECHA_ANTERIOR",
+                "PRODUCCION_AGUA_FECHA_ANTERIOR"
+            ])
+
+        ult_prod["ANIO_MES_PROD"] = ult_prod["ULTIMA_FECHA_CON_PRODUCCION_PETROLEO"].dt.to_period("M")
+
+        mensual_prod = mensual.rename(columns={
+            "ANIO_MES": "ANIO_MES_PROD",
+            "PRCR_MES": "PRCR_ULTIMO_MES_CON_PRODUCCION",
+            "PRAG_MES": "PRAG_ULTIMO_MES_CON_PRODUCCION",
+            "INTERV_MES": "INTERV_ULTIMO_MES_CON_PRODUCCION"
+        })[[
+            "POZO_KEY",
+            "ANIO_MES_PROD",
+            "PRCR_ULTIMO_MES_CON_PRODUCCION",
+            "PRAG_ULTIMO_MES_CON_PRODUCCION",
+            "INTERV_ULTIMO_MES_CON_PRODUCCION"
+        ]]
+
+        ult_prod = ult_prod.merge(
+            mensual_prod,
+            on=["POZO_KEY", "ANIO_MES_PROD"],
+            how="left"
+        )
+
+        ult_prod["ANIO_PROD"] = ult_prod["ANIO_MES_PROD"].dt.year
+        ult_prod["MES_PROD"] = ult_prod["ANIO_MES_PROD"].dt.month
+        ult_prod["ULTIMO_MES_CON_PRODUCCION_PETROLEO"] = ult_prod.apply(
+            lambda r: periodo_texto(r["ANIO_PROD"], r["MES_PROD"]),
+            axis=1
+        )
+        ult_prod["DIAS_ULTIMO_MES_CON_PRODUCCION"] = ult_prod.apply(
+            lambda r: dias_mes(r["ANIO_PROD"], r["MES_PROD"]),
+            axis=1
+        )
+        ult_prod["POTENCIAL_ULTIMO_MES_CON_PRODUCCION_BOPD"] = np.where(
+            ult_prod["DIAS_ULTIMO_MES_CON_PRODUCCION"] > 0,
+            ult_prod["PRCR_ULTIMO_MES_CON_PRODUCCION"] / ult_prod["DIAS_ULTIMO_MES_CON_PRODUCCION"],
+            0
+        )
+
+        prod_trazabilidad = ult_prod.merge(prod_ant, on="POZO_KEY", how="left")
+
+        prod_trazabilidad = prod_trazabilidad[[
+            "POZO_KEY",
+            "ULTIMA_FECHA_CON_PRODUCCION_PETROLEO",
+            "PRODUCCION_PETROLEO_ULTIMA_FECHA",
+            "PRODUCCION_AGUA_ULTIMA_FECHA",
+            "FECHA_PRODUCCION_PETROLEO_ANTERIOR",
+            "PRODUCCION_PETROLEO_FECHA_ANTERIOR",
+            "PRODUCCION_AGUA_FECHA_ANTERIOR",
+            "ULTIMO_MES_CON_PRODUCCION_PETROLEO",
+            "DIAS_ULTIMO_MES_CON_PRODUCCION",
+            "PRCR_ULTIMO_MES_CON_PRODUCCION",
+            "PRAG_ULTIMO_MES_CON_PRODUCCION",
+            "INTERV_ULTIMO_MES_CON_PRODUCCION",
+            "POTENCIAL_ULTIMO_MES_CON_PRODUCCION_BOPD"
+        ]]
+    else:
+        prod_trazabilidad = pd.DataFrame(columns=[
+            "POZO_KEY",
+            "ULTIMA_FECHA_CON_PRODUCCION_PETROLEO",
+            "PRODUCCION_PETROLEO_ULTIMA_FECHA",
+            "PRODUCCION_AGUA_ULTIMA_FECHA",
+            "FECHA_PRODUCCION_PETROLEO_ANTERIOR",
+            "PRODUCCION_PETROLEO_FECHA_ANTERIOR",
+            "PRODUCCION_AGUA_FECHA_ANTERIOR",
+            "ULTIMO_MES_CON_PRODUCCION_PETROLEO",
+            "DIAS_ULTIMO_MES_CON_PRODUCCION",
+            "PRCR_ULTIMO_MES_CON_PRODUCCION",
+            "PRAG_ULTIMO_MES_CON_PRODUCCION",
+            "INTERV_ULTIMO_MES_CON_PRODUCCION",
+            "POTENCIAL_ULTIMO_MES_CON_PRODUCCION_BOPD"
+        ])
+
+    out = universo.merge(potencial_interv, on="POZO_KEY", how="left")
+    out = out.merge(prod_trazabilidad, on="POZO_KEY", how="left")
 
     texto_cols = [
         "ULTIMO_MES_INTERVENIDO",
         "MES_1_MES_ANTES_ULTIMA_INTERVENCION",
-        "MES_2_MES_ANTES_ULTIMA_INTERVENCION"
+        "MES_2_MES_ANTES_ULTIMA_INTERVENCION",
+        "ULTIMO_MES_CON_PRODUCCION_PETROLEO"
     ]
 
     for col in texto_cols:
         if col in out.columns:
-            out[col] = out[col].fillna("Sin intervención")
+            out[col] = out[col].fillna("Sin dato")
+
+    fecha_cols = [
+        "ULTIMA_FECHA_INTERVENCION",
+        "ULTIMA_FECHA_CON_PRODUCCION_PETROLEO",
+        "FECHA_PRODUCCION_PETROLEO_ANTERIOR"
+    ]
+
+    for col in fecha_cols:
+        if col in out.columns:
+            out[col] = pd.to_datetime(out[col], errors="coerce")
 
     num_cols = [
         "DIAS_ULTIMO_MES_INTERVENIDO",
@@ -523,7 +885,16 @@ def calcular_potencial(df, universo, baterias=None, tipos=None, clases=None):
         "PRAG_2_MES_ANTES_ULTIMA_INTERVENCION",
         "INTERV_2_MES_ANTES_ULTIMA_INTERVENCION",
         "POTENCIAL_2_MES_ANTES_ULTIMA_INTERVENCION_BOPD",
-        "POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD"
+        "POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD",
+        "PRODUCCION_PETROLEO_ULTIMA_FECHA",
+        "PRODUCCION_AGUA_ULTIMA_FECHA",
+        "PRODUCCION_PETROLEO_FECHA_ANTERIOR",
+        "PRODUCCION_AGUA_FECHA_ANTERIOR",
+        "DIAS_ULTIMO_MES_CON_PRODUCCION",
+        "PRCR_ULTIMO_MES_CON_PRODUCCION",
+        "PRAG_ULTIMO_MES_CON_PRODUCCION",
+        "INTERV_ULTIMO_MES_CON_PRODUCCION",
+        "POTENCIAL_ULTIMO_MES_CON_PRODUCCION_BOPD"
     ]
 
     for col in num_cols:
@@ -684,7 +1055,19 @@ def calcular_analisis(df, universo, anio, mes, meses_base, baterias, tipos, clas
         "PRAG_2_MES_ANTES_ULTIMA_INTERVENCION",
         "INTERV_2_MES_ANTES_ULTIMA_INTERVENCION",
         "POTENCIAL_2_MES_ANTES_ULTIMA_INTERVENCION_BOPD",
-        "POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD"
+        "POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD",
+        "ULTIMA_FECHA_CON_PRODUCCION_PETROLEO",
+        "PRODUCCION_PETROLEO_ULTIMA_FECHA",
+        "PRODUCCION_AGUA_ULTIMA_FECHA",
+        "FECHA_PRODUCCION_PETROLEO_ANTERIOR",
+        "PRODUCCION_PETROLEO_FECHA_ANTERIOR",
+        "PRODUCCION_AGUA_FECHA_ANTERIOR",
+        "ULTIMO_MES_CON_PRODUCCION_PETROLEO",
+        "DIAS_ULTIMO_MES_CON_PRODUCCION",
+        "PRCR_ULTIMO_MES_CON_PRODUCCION",
+        "PRAG_ULTIMO_MES_CON_PRODUCCION",
+        "INTERV_ULTIMO_MES_CON_PRODUCCION",
+        "POTENCIAL_ULTIMO_MES_CON_PRODUCCION_BOPD"
     ]
     desp = desp.merge(potencial[pot_cols], on="POZO_KEY", how="left")
 
@@ -955,6 +1338,13 @@ with tabs[0]:
         "PRCR_2_MES_ANTES_ULTIMA_INTERVENCION",
         "POTENCIAL_2_MES_ANTES_ULTIMA_INTERVENCION_BOPD",
         "POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD",
+        "ULTIMA_FECHA_CON_PRODUCCION_PETROLEO",
+        "PRODUCCION_PETROLEO_ULTIMA_FECHA",
+        "FECHA_PRODUCCION_PETROLEO_ANTERIOR",
+        "PRODUCCION_PETROLEO_FECHA_ANTERIOR",
+        "ULTIMO_MES_CON_PRODUCCION_PETROLEO",
+        "PRCR_ULTIMO_MES_CON_PRODUCCION",
+        "POTENCIAL_ULTIMO_MES_CON_PRODUCCION_BOPD",
         "PRAG_BASE", "PRAG_ACTUAL", "PRAG_BASE_NO_REALIZADO"
     ]
     cols_desp = [c for c in cols_desp if c in tabla.columns]
@@ -1000,12 +1390,86 @@ with tabs[1]:
     st.subheader("Impacto de priorizar convertidos 2026")
 
     conv_actual = actual[actual["CLASIFICACION"] == "Convertido 2026"]
+    conv_det = _conv2026_detalle(list_conv, actual, pot)
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Conv. 2026 intervenidos", f"{conv_actual['POZO_KEY'].nunique():,} de 20")
     c2.metric("Interv. conv. 2026", f"{len(conv_actual):,}")
-    c3.metric("Producción de petróleo conv. 2026", f"{conv_actual['PRCR'].sum():,.2f}")
-    c4.metric("Producción de agua conv. 2026", f"{conv_actual['PRAG'].sum():,.2f}")
+    c3.metric("Producción de petróleo", f"{conv_actual['PRCR'].sum():,.2f}")
+    c4.metric("Producción de agua", f"{conv_actual['PRAG'].sum():,.2f}")
+    c5.metric(
+        "Petróleo por intervención",
+        f"{(conv_actual['PRCR'].sum() / len(conv_actual)):,.2f}" if len(conv_actual) > 0 else "0.00"
+    )
+
+    st.caption(
+        "Esta vista separa los 20 convertidos 2026 como grupo priorizado y muestra su producción, "
+        "frecuencia, potencial y trazabilidad de la última producción real de petróleo."
+    )
+
+    if not conv_det.empty:
+        col_a, col_b = st.columns(2)
+
+        with col_a:
+            fig_conv_pet = px.bar(
+                conv_det.sort_values("PRCR", ascending=False).head(top_n),
+                x="POZO",
+                y="PRCR",
+                color="ESTADO_CONVERTIDO_2026",
+                text="PRCR",
+                hover_data=["BATERIA", "INTERVENCIONES", "PRAG", "PETROLEO_POR_INTERVENCION"]
+            )
+            st.plotly_chart(
+                aplicar_layout(fig_conv_pet, f"Top {top_n} convertidos 2026 por producción de petróleo", 520),
+                use_container_width=True
+            )
+
+        with col_b:
+            fig_conv_pot = px.scatter(
+                conv_det,
+                x="POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD",
+                y="PRCR",
+                size="INTERVENCIONES",
+                color="ESTADO_CONVERTIDO_2026",
+                hover_name="POZO",
+                hover_data=[
+                    "BATERIA",
+                    "ULTIMO_MES_INTERVENIDO",
+                    "ULTIMA_FECHA_CON_PRODUCCION_PETROLEO",
+                    "PRODUCCION_PETROLEO_ULTIMA_FECHA"
+                ]
+            )
+            st.plotly_chart(
+                aplicar_layout(fig_conv_pot, "Convertidos 2026: potencial vs producción actual", 520),
+                use_container_width=True
+            )
+
+        fig_estado = px.pie(
+            conv_det,
+            names="ESTADO_CONVERTIDO_2026",
+            values="INTERVENCIONES",
+            hole=0.45,
+            title="Distribución de intervenciones en convertidos 2026"
+        )
+        fig_estado.update_traces(texttemplate="%{label}<br>%{percent:.2%}")
+        st.plotly_chart(aplicar_layout(fig_estado, "Distribución de intervenciones en convertidos 2026", 480), use_container_width=True)
+
+        cols_conv_impacto = [
+            "POZO", "BATERIA", "ESTADO_CONVERTIDO_2026", "INTERVENCIONES", "PRCR", "PRAG",
+            "PETROLEO_POR_INTERVENCION", "ULTIMO_MES_INTERVENIDO", "PRCR_ULTIMO_MES_INTERVENIDO",
+            "POTENCIAL_ULTIMO_MES_INTERVENIDO_BOPD", "POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD",
+            "ULTIMA_FECHA_CON_PRODUCCION_PETROLEO", "PRODUCCION_PETROLEO_ULTIMA_FECHA",
+            "FECHA_PRODUCCION_PETROLEO_ANTERIOR", "PRODUCCION_PETROLEO_FECHA_ANTERIOR"
+        ]
+        cols_conv_impacto = [c for c in cols_conv_impacto if c in conv_det.columns]
+        st.dataframe(vista_tabla(conv_det[cols_conv_impacto]), use_container_width=True, hide_index=True)
+
+        st.download_button(
+            "Descargar data de gráficos convertidos 2026",
+            data=excel_descarga({"Convertidos 2026": conv_det[cols_conv_impacto]}),
+            file_name=f"data_convertidos_2026_{anio_obj}_{mes_obj}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
     if not res_clase.empty:
         fig = px.bar(res_clase, x="CLASIFICACION", y=["PRCR", "PRAG"], barmode="group", text_auto=".2f")
@@ -1054,7 +1518,19 @@ with tabs[3]:
         "MES_2_MES_ANTES_ULTIMA_INTERVENCION",
         "PRCR_2_MES_ANTES_ULTIMA_INTERVENCION",
         "POTENCIAL_2_MES_ANTES_ULTIMA_INTERVENCION_BOPD",
-        "POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD"
+        "POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD",
+        "ULTIMA_FECHA_CON_PRODUCCION_PETROLEO",
+        "PRODUCCION_PETROLEO_ULTIMA_FECHA",
+        "PRODUCCION_AGUA_ULTIMA_FECHA",
+        "FECHA_PRODUCCION_PETROLEO_ANTERIOR",
+        "PRODUCCION_PETROLEO_FECHA_ANTERIOR",
+        "PRODUCCION_AGUA_FECHA_ANTERIOR",
+        "ULTIMO_MES_CON_PRODUCCION_PETROLEO",
+        "DIAS_ULTIMO_MES_CON_PRODUCCION",
+        "PRCR_ULTIMO_MES_CON_PRODUCCION",
+        "PRAG_ULTIMO_MES_CON_PRODUCCION",
+        "INTERV_ULTIMO_MES_CON_PRODUCCION",
+        "POTENCIAL_ULTIMO_MES_CON_PRODUCCION_BOPD"
     ]
     cols = [c for c in cols if c in pot.columns]
     st.dataframe(vista_tabla(pot[cols]), use_container_width=True, hide_index=True)
@@ -1066,7 +1542,7 @@ with tabs[3]:
             x="POZO",
             y=["POTENCIAL_ULTIMO_MES_INTERVENIDO_BOPD", "POTENCIAL_1_MES_ANTES_ULTIMA_INTERVENCION_BOPD", "POTENCIAL_2_MES_ANTES_ULTIMA_INTERVENCION_BOPD"],
             barmode="group",
-            hover_data=["BATERIA", "CLASIFICACION", "ULTIMO_MES_INTERVENIDO", "MES_1_MES_ANTES_ULTIMA_INTERVENCION", "MES_2_MES_ANTES_ULTIMA_INTERVENCION"]
+            hover_data=["BATERIA", "CLASIFICACION", "ULTIMO_MES_INTERVENIDO", "MES_1_MES_ANTES_ULTIMA_INTERVENCION", "MES_2_MES_ANTES_ULTIMA_INTERVENCION", "ULTIMA_FECHA_CON_PRODUCCION_PETROLEO", "ULTIMO_MES_CON_PRODUCCION_PETROLEO"]
         )
         st.plotly_chart(aplicar_layout(fig, f"Top {top_n} pozos por potencial", 560), use_container_width=True)
 
@@ -1139,6 +1615,36 @@ with tabs[6]:
         data=excel_descarga(tablas),
         file_name=f"swab_lote_x_{anio_obj}_{mes_obj}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+    kpis_ppt = {
+        "pozos_universo": pozos_universo,
+        "pozos_interv": pozos_interv,
+        "pozos_no": pozos_no,
+        "interv": interv,
+        "petroleo": petroleo,
+        "agua": agua
+    }
+
+    ppt_bytes = crear_ppt_dashboard(
+        periodo=periodo,
+        kpis=kpis_ppt,
+        res_clase=res_clase,
+        res_bat=res_bat,
+        res_tipo=res_tipo,
+        res_tend=res_tend,
+        desp=desp,
+        pot=pot,
+        list_conv=list_conv,
+        actual=actual,
+        top_n=top_n
+    )
+
+    st.download_button(
+        "Descargar PPT editable",
+        data=ppt_bytes,
+        file_name=f"dashboard_swab_lote_x_{anio_obj}_{mes_obj}.pptx",
+        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
     )
 
     validacion = pd.DataFrame({
