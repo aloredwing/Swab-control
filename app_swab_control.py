@@ -90,15 +90,31 @@ LABELS = {
     "PRCR_MES_ANTERIOR_OBJETIVO": "Petróleo mes anterior al objetivo",
     "PRODUCCION_PETROLEO_DEJADA_MES_ANTERIOR": "Petróleo dejado vs mes anterior",
     "VAR_PETROLEO_VS_MES_ANTERIOR": "Variación petróleo vs mes anterior",
-    "POTENCIAL_ULTIMO_MES_BOPD": "Potencial último mes activo bopd",
-    "POTENCIAL_MES_ANTERIOR_BOPD": "Potencial mes anterior bopd",
-    "POTENCIAL_PROMEDIO_2_MESES_BOPD": "Potencial promedio 2 meses bopd",
-    "ULTIMO_MES_ACTIVO": "Último mes activo",
-    "PRCR_ULTIMO_MES": "Petróleo último mes activo",
-    "PRAG_ULTIMO_MES": "Agua último mes activo",
-    "INTERV_ULTIMO_MES": "Intervenciones último mes activo",
-    "MES_ANTERIOR_ULTIMO_ACTIVO": "Mes anterior al último activo",
-    "PRCR_MES_ANTERIOR": "Petróleo mes anterior al último activo",
+
+    "ULTIMO_MES_INTERVENIDO": "Último mes intervenido",
+    "ULTIMA_FECHA_INTERVENCION": "Última fecha de intervención",
+    "DIAS_ULTIMO_MES_INTERVENIDO": "Días último mes intervenido",
+    "PRCR_ULTIMO_MES_INTERVENIDO": "Petróleo último mes intervenido",
+    "PRAG_ULTIMO_MES_INTERVENIDO": "Agua último mes intervenido",
+    "INTERV_ULTIMO_MES_INTERVENIDO": "Intervenciones último mes intervenido",
+    "POTENCIAL_ULTIMO_MES_INTERVENIDO_BOPD": "Potencial último mes intervenido bopd",
+
+    "MES_1_MES_ANTES_ULTIMA_INTERVENCION": "1 mes antes de última intervención",
+    "DIAS_1_MES_ANTES_ULTIMA_INTERVENCION": "Días 1 mes antes",
+    "PRCR_1_MES_ANTES_ULTIMA_INTERVENCION": "Petróleo 1 mes antes",
+    "PRAG_1_MES_ANTES_ULTIMA_INTERVENCION": "Agua 1 mes antes",
+    "INTERV_1_MES_ANTES_ULTIMA_INTERVENCION": "Intervenciones 1 mes antes",
+    "POTENCIAL_1_MES_ANTES_ULTIMA_INTERVENCION_BOPD": "Potencial 1 mes antes bopd",
+
+    "MES_2_MES_ANTES_ULTIMA_INTERVENCION": "2 meses antes de última intervención",
+    "DIAS_2_MES_ANTES_ULTIMA_INTERVENCION": "Días 2 meses antes",
+    "PRCR_2_MES_ANTES_ULTIMA_INTERVENCION": "Petróleo 2 meses antes",
+    "PRAG_2_MES_ANTES_ULTIMA_INTERVENCION": "Agua 2 meses antes",
+    "INTERV_2_MES_ANTES_ULTIMA_INTERVENCION": "Intervenciones 2 meses antes",
+    "POTENCIAL_2_MES_ANTES_ULTIMA_INTERVENCION_BOPD": "Potencial 2 meses antes bopd",
+
+    "POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD": "Potencial promedio 3 meses bopd",
+
     "INTERVENCIONES": "Intervenciones",
     "PRCR": "Producción de petróleo",
     "PRAG": "Producción de agua",
@@ -362,6 +378,18 @@ def resumen_pozo_periodo(data, sufijo, divisor=1):
 
 
 def calcular_potencial(df, universo, baterias=None, tipos=None, clases=None):
+    """
+    Calcula potencial usando como referencia la última intervención del pozo,
+    no necesariamente el último mes con producción de petróleo.
+
+    Para cada pozo calcula:
+    1. Potencial del último mes intervenido
+    2. Potencial de 1 mes antes de la última intervención
+    3. Potencial de 2 meses antes de la última intervención
+
+    Fórmula:
+    Potencial BOPD = producción de petróleo del mes / días calendario del mes
+    """
     data = df.copy()
 
     if baterias:
@@ -371,69 +399,139 @@ def calcular_potencial(df, universo, baterias=None, tipos=None, clases=None):
     if clases:
         data = data[data["CLASIFICACION"].isin(clases)]
 
-    prod = data[data["PRCR"] > 0].copy()
-
-    if prod.empty:
+    if data.empty:
         out = universo.copy()
-        out["ULTIMO_MES_ACTIVO"] = "Sin producción"
-        out["POTENCIAL_ULTIMO_MES_BOPD"] = 0.0
-        out["POTENCIAL_MES_ANTERIOR_BOPD"] = 0.0
-        out["POTENCIAL_PROMEDIO_2_MESES_BOPD"] = 0.0
+        out["ULTIMO_MES_INTERVENIDO"] = "Sin intervención"
+        out["ULTIMA_FECHA_INTERVENCION"] = pd.NaT
+        out["POTENCIAL_ULTIMO_MES_INTERVENIDO_BOPD"] = 0.0
+        out["POTENCIAL_1_MES_ANTES_ULTIMA_INTERVENCION_BOPD"] = 0.0
+        out["POTENCIAL_2_MES_ANTES_ULTIMA_INTERVENCION_BOPD"] = 0.0
+        out["POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD"] = 0.0
         return out
 
-    prod["ANIO_MES"] = prod["FECHA"].dt.to_period("M")
+    data["ANIO_MES"] = data["FECHA"].dt.to_period("M")
 
     mensual = (
-        prod.groupby(["POZO_KEY", "ANIO_MES"], as_index=False)
+        data.groupby(["POZO_KEY", "ANIO_MES"], as_index=False)
         .agg(
-            PRCR_ULTIMO_MES=("PRCR", "sum"),
-            PRAG_ULTIMO_MES=("PRAG", "sum"),
-            INTERV_ULTIMO_MES=("FECHA", "count"),
-            ULTIMA_FECHA_CON_PRCR=("FECHA", "max")
+            PRCR_MES=("PRCR", "sum"),
+            PRAG_MES=("PRAG", "sum"),
+            INTERV_MES=("FECHA", "count"),
+            ULTIMA_FECHA_MES=("FECHA", "max")
         )
     )
 
     idx = mensual.groupby("POZO_KEY")["ANIO_MES"].idxmax()
-    ultimo = mensual.loc[idx].copy()
+    ultimo = mensual.loc[idx, ["POZO_KEY", "ANIO_MES", "ULTIMA_FECHA_MES"]].copy()
+    ultimo = ultimo.rename(columns={
+        "ANIO_MES": "PERIODO_ULTIMA_INTERVENCION",
+        "ULTIMA_FECHA_MES": "ULTIMA_FECHA_INTERVENCION"
+    })
 
-    ultimo["ANIO_ULT"] = ultimo["ANIO_MES"].dt.year
-    ultimo["MES_ULT"] = ultimo["ANIO_MES"].dt.month
-    ultimo["DIAS_MES"] = ultimo.apply(lambda r: dias_mes(r["ANIO_ULT"], r["MES_ULT"]), axis=1)
-    ultimo["ULTIMO_MES_ACTIVO"] = ultimo.apply(lambda r: periodo_texto(r["ANIO_ULT"], r["MES_ULT"]), axis=1)
-    ultimo["POTENCIAL_ULTIMO_MES_BOPD"] = ultimo["PRCR_ULTIMO_MES"] / ultimo["DIAS_MES"]
+    registros = []
 
-    previos = []
-    for _, r in ultimo.iterrows():
-        a_prev, m_prev = mes_anterior(r["ANIO_ULT"], r["MES_ULT"], 1)
-        periodo_prev = pd.Period(f"{a_prev}-{m_prev:02d}", freq="M")
-        parte = mensual[(mensual["POZO_KEY"] == r["POZO_KEY"]) & (mensual["ANIO_MES"] == periodo_prev)]
+    for _, row in ultimo.iterrows():
+        pozo_key = row["POZO_KEY"]
+        periodo_ult = row["PERIODO_ULTIMA_INTERVENCION"]
+        anio_ult = int(periodo_ult.year)
+        mes_ult = int(periodo_ult.month)
 
-        prcr_prev = float(parte["PRCR_ULTIMO_MES"].iloc[0]) if not parte.empty else 0.0
-        potencial_prev = prcr_prev / dias_mes(a_prev, m_prev)
+        registro = {
+            "POZO_KEY": pozo_key,
+            "ULTIMO_MES_INTERVENIDO": periodo_texto(anio_ult, mes_ult),
+            "ULTIMA_FECHA_INTERVENCION": row["ULTIMA_FECHA_INTERVENCION"],
+        }
 
-        previos.append({
-            "POZO_KEY": r["POZO_KEY"],
-            "MES_ANTERIOR_ULTIMO_ACTIVO": periodo_texto(a_prev, m_prev),
-            "PRCR_MES_ANTERIOR": prcr_prev,
-            "POTENCIAL_MES_ANTERIOR_BOPD": potencial_prev
-        })
+        for offset, etiqueta in [
+            (0, "ULTIMO_MES_INTERVENIDO"),
+            (1, "1_MES_ANTES_ULTIMA_INTERVENCION"),
+            (2, "2_MES_ANTES_ULTIMA_INTERVENCION"),
+        ]:
+            if offset == 0:
+                a_ref, m_ref = anio_ult, mes_ult
+            else:
+                a_ref, m_ref = mes_anterior(anio_ult, mes_ult, offset)
 
-    previos = pd.DataFrame(previos)
-    out = universo.merge(ultimo, on="POZO_KEY", how="left").merge(previos, on="POZO_KEY", how="left")
+            periodo_ref = pd.Period(f"{a_ref}-{m_ref:02d}", freq="M")
+            parte = mensual[
+                (mensual["POZO_KEY"] == pozo_key) &
+                (mensual["ANIO_MES"] == periodo_ref)
+            ]
 
-    for c in ["PRCR_ULTIMO_MES", "PRAG_ULTIMO_MES", "INTERV_ULTIMO_MES", "POTENCIAL_ULTIMO_MES_BOPD", "PRCR_MES_ANTERIOR", "POTENCIAL_MES_ANTERIOR_BOPD"]:
-        out[c] = out[c].fillna(0)
+            if parte.empty:
+                prcr_mes = 0.0
+                prag_mes = 0.0
+                interv_mes = 0
+            else:
+                prcr_mes = float(parte["PRCR_MES"].iloc[0])
+                prag_mes = float(parte["PRAG_MES"].iloc[0])
+                interv_mes = int(parte["INTERV_MES"].iloc[0])
 
-    out["ULTIMO_MES_ACTIVO"] = out["ULTIMO_MES_ACTIVO"].fillna("Sin producción")
-    out["MES_ANTERIOR_ULTIMO_ACTIVO"] = out["MES_ANTERIOR_ULTIMO_ACTIVO"].fillna("")
-    out["POTENCIAL_PROMEDIO_2_MESES_BOPD"] = np.where(
-        out["PRCR_MES_ANTERIOR"] > 0,
-        (out["POTENCIAL_ULTIMO_MES_BOPD"] + out["POTENCIAL_MES_ANTERIOR_BOPD"]) / 2,
-        out["POTENCIAL_ULTIMO_MES_BOPD"]
-    )
+            dias = dias_mes(a_ref, m_ref)
+            potencial = prcr_mes / dias if dias > 0 else 0
 
-    return out.sort_values("POTENCIAL_PROMEDIO_2_MESES_BOPD", ascending=False)
+            if offset == 0:
+                registro["DIAS_ULTIMO_MES_INTERVENIDO"] = dias
+                registro["PRCR_ULTIMO_MES_INTERVENIDO"] = prcr_mes
+                registro["PRAG_ULTIMO_MES_INTERVENIDO"] = prag_mes
+                registro["INTERV_ULTIMO_MES_INTERVENIDO"] = interv_mes
+                registro["POTENCIAL_ULTIMO_MES_INTERVENIDO_BOPD"] = potencial
+            else:
+                registro[f"MES_{etiqueta}"] = periodo_texto(a_ref, m_ref)
+                registro[f"DIAS_{etiqueta}"] = dias
+                registro[f"PRCR_{etiqueta}"] = prcr_mes
+                registro[f"PRAG_{etiqueta}"] = prag_mes
+                registro[f"INTERV_{etiqueta}"] = interv_mes
+                registro[f"POTENCIAL_{etiqueta}_BOPD"] = potencial
 
+        # Promedio simple de los 3 meses revisados: último mes intervenido,
+        # 1 mes antes y 2 meses antes.
+        registro["POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD"] = (
+            registro["POTENCIAL_ULTIMO_MES_INTERVENIDO_BOPD"] +
+            registro["POTENCIAL_1_MES_ANTES_ULTIMA_INTERVENCION_BOPD"] +
+            registro["POTENCIAL_2_MES_ANTES_ULTIMA_INTERVENCION_BOPD"]
+        ) / 3
+
+        registros.append(registro)
+
+    potencial = pd.DataFrame(registros)
+    out = universo.merge(potencial, on="POZO_KEY", how="left")
+
+    texto_cols = [
+        "ULTIMO_MES_INTERVENIDO",
+        "MES_1_MES_ANTES_ULTIMA_INTERVENCION",
+        "MES_2_MES_ANTES_ULTIMA_INTERVENCION"
+    ]
+
+    for col in texto_cols:
+        if col in out.columns:
+            out[col] = out[col].fillna("Sin intervención")
+
+    num_cols = [
+        "DIAS_ULTIMO_MES_INTERVENIDO",
+        "PRCR_ULTIMO_MES_INTERVENIDO",
+        "PRAG_ULTIMO_MES_INTERVENIDO",
+        "INTERV_ULTIMO_MES_INTERVENIDO",
+        "POTENCIAL_ULTIMO_MES_INTERVENIDO_BOPD",
+        "DIAS_1_MES_ANTES_ULTIMA_INTERVENCION",
+        "PRCR_1_MES_ANTES_ULTIMA_INTERVENCION",
+        "PRAG_1_MES_ANTES_ULTIMA_INTERVENCION",
+        "INTERV_1_MES_ANTES_ULTIMA_INTERVENCION",
+        "POTENCIAL_1_MES_ANTES_ULTIMA_INTERVENCION_BOPD",
+        "DIAS_2_MES_ANTES_ULTIMA_INTERVENCION",
+        "PRCR_2_MES_ANTES_ULTIMA_INTERVENCION",
+        "PRAG_2_MES_ANTES_ULTIMA_INTERVENCION",
+        "INTERV_2_MES_ANTES_ULTIMA_INTERVENCION",
+        "POTENCIAL_2_MES_ANTES_ULTIMA_INTERVENCION_BOPD",
+        "POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD"
+    ]
+
+    for col in num_cols:
+        if col not in out.columns:
+            out[col] = 0
+        out[col] = out[col].fillna(0)
+
+    return out.sort_values("POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD", ascending=False)
 
 def calcular_analisis(df, universo, anio, mes, meses_base, baterias, tipos, clases_general, clases_desplazadas):
     # Data del mes objetivo
@@ -566,10 +664,27 @@ def calcular_analisis(df, universo, anio, mes, meses_base, baterias, tipos, clas
     )
 
     pot_cols = [
-        "POZO_KEY", "ULTIMO_MES_ACTIVO", "PRCR_ULTIMO_MES", "PRAG_ULTIMO_MES",
-        "INTERV_ULTIMO_MES", "POTENCIAL_ULTIMO_MES_BOPD", "MES_ANTERIOR_ULTIMO_ACTIVO",
-        "PRCR_MES_ANTERIOR", "POTENCIAL_MES_ANTERIOR_BOPD",
-        "POTENCIAL_PROMEDIO_2_MESES_BOPD"
+        "POZO_KEY",
+        "ULTIMO_MES_INTERVENIDO",
+        "ULTIMA_FECHA_INTERVENCION",
+        "DIAS_ULTIMO_MES_INTERVENIDO",
+        "PRCR_ULTIMO_MES_INTERVENIDO",
+        "PRAG_ULTIMO_MES_INTERVENIDO",
+        "INTERV_ULTIMO_MES_INTERVENIDO",
+        "POTENCIAL_ULTIMO_MES_INTERVENIDO_BOPD",
+        "MES_1_MES_ANTES_ULTIMA_INTERVENCION",
+        "DIAS_1_MES_ANTES_ULTIMA_INTERVENCION",
+        "PRCR_1_MES_ANTES_ULTIMA_INTERVENCION",
+        "PRAG_1_MES_ANTES_ULTIMA_INTERVENCION",
+        "INTERV_1_MES_ANTES_ULTIMA_INTERVENCION",
+        "POTENCIAL_1_MES_ANTES_ULTIMA_INTERVENCION_BOPD",
+        "MES_2_MES_ANTES_ULTIMA_INTERVENCION",
+        "DIAS_2_MES_ANTES_ULTIMA_INTERVENCION",
+        "PRCR_2_MES_ANTES_ULTIMA_INTERVENCION",
+        "PRAG_2_MES_ANTES_ULTIMA_INTERVENCION",
+        "INTERV_2_MES_ANTES_ULTIMA_INTERVENCION",
+        "POTENCIAL_2_MES_ANTES_ULTIMA_INTERVENCION_BOPD",
+        "POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD"
     ]
     desp = desp.merge(potencial[pot_cols], on="POZO_KEY", how="left")
 
@@ -811,7 +926,7 @@ with tabs[0]:
     k3.metric("Interv. base no realizadas", f"{desp['INTERV_BASE_NO_REALIZADAS'].sum():,.2f}")
     k4.metric("Petróleo base no realizado", f"{desp['PRCR_BASE_NO_REALIZADO'].sum():,.2f}")
     k5.metric("Petróleo dejado vs mes anterior", f"{desp['PRODUCCION_PETROLEO_DEJADA_MES_ANTERIOR'].sum():,.2f}")
-    k6.metric("Potencial promedio 2 meses", f"{desp['POTENCIAL_PROMEDIO_2_MESES_BOPD'].sum():,.2f} bopd")
+    k6.metric("Potencial promedio 3 meses", f"{desp['POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD'].sum():,.2f} bopd")
 
     base_txt = ", ".join([periodo_texto(a, m) for a, m in meses_previos])
     st.info(f"Periodo objetivo: {periodo}. Base comparativa: promedio mensual de {meses_base} mes(es) anteriores: {base_txt}.")
@@ -831,9 +946,16 @@ with tabs[0]:
         "INTERV_BASE", "INTERV_ACTUAL", "INTERV_BASE_NO_REALIZADAS",
         "PRCR_BASE", "PRCR_ACTUAL", "PRCR_BASE_NO_REALIZADO",
         "PRCR_MES_ANTERIOR_OBJETIVO", "PRODUCCION_PETROLEO_DEJADA_MES_ANTERIOR", "VAR_PETROLEO_VS_MES_ANTERIOR",
-        "ULTIMO_MES_ACTIVO", "PRCR_ULTIMO_MES", "POTENCIAL_ULTIMO_MES_BOPD",
-        "MES_ANTERIOR_ULTIMO_ACTIVO", "PRCR_MES_ANTERIOR", "POTENCIAL_MES_ANTERIOR_BOPD",
-        "POTENCIAL_PROMEDIO_2_MESES_BOPD", "PRAG_BASE", "PRAG_ACTUAL", "PRAG_BASE_NO_REALIZADO"
+        "ULTIMO_MES_INTERVENIDO", "ULTIMA_FECHA_INTERVENCION",
+        "PRCR_ULTIMO_MES_INTERVENIDO", "POTENCIAL_ULTIMO_MES_INTERVENIDO_BOPD",
+        "MES_1_MES_ANTES_ULTIMA_INTERVENCION",
+        "PRCR_1_MES_ANTES_ULTIMA_INTERVENCION",
+        "POTENCIAL_1_MES_ANTES_ULTIMA_INTERVENCION_BOPD",
+        "MES_2_MES_ANTES_ULTIMA_INTERVENCION",
+        "PRCR_2_MES_ANTES_ULTIMA_INTERVENCION",
+        "POTENCIAL_2_MES_ANTES_ULTIMA_INTERVENCION_BOPD",
+        "POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD",
+        "PRAG_BASE", "PRAG_ACTUAL", "PRAG_BASE_NO_REALIZADO"
     ]
     cols_desp = [c for c in cols_desp if c in tabla.columns]
 
@@ -852,20 +974,20 @@ with tabs[0]:
             y="PRCR_BASE_NO_REALIZADO",
             color="ESTADO_DESPLAZAMIENTO",
             text="PRCR_BASE_NO_REALIZADO",
-            hover_data=["BATERIA", "CLASIFICACION", "POTENCIAL_PROMEDIO_2_MESES_BOPD"]
+            hover_data=["BATERIA", "CLASIFICACION", "POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD"]
         )
         st.plotly_chart(aplicar_layout(fig, f"Top {top_n} pozos con petróleo base no realizado", 560), use_container_width=True)
 
         fig2 = px.scatter(
             top_dej,
-            x="POTENCIAL_PROMEDIO_2_MESES_BOPD",
+            x="POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD",
             y="PRCR_BASE_NO_REALIZADO",
             size="INTERV_BASE_NO_REALIZADAS",
             color="CLASIFICACION",
             hover_name="POZO",
             hover_data=["BATERIA", "ESTADO_DESPLAZAMIENTO", "PRODUCCION_PETROLEO_DEJADA_MES_ANTERIOR"]
         )
-        st.plotly_chart(aplicar_layout(fig2, "Potencial promedio 2 meses vs petróleo base no realizado", 560), use_container_width=True)
+        st.plotly_chart(aplicar_layout(fig2, "Potencial promedio 3 meses vs petróleo base no realizado", 560), use_container_width=True)
 
     st.download_button(
         "Descargar data de gráficas de pozos dejados",
@@ -897,7 +1019,7 @@ with tabs[1]:
             INTERV_BASE_NO_REALIZADAS=("INTERV_BASE_NO_REALIZADAS", "sum"),
             PRCR_BASE_NO_REALIZADO=("PRCR_BASE_NO_REALIZADO", "sum"),
             PRODUCCION_PETROLEO_DEJADA_MES_ANTERIOR=("PRODUCCION_PETROLEO_DEJADA_MES_ANTERIOR", "sum"),
-            POTENCIAL_PROMEDIO_2_MESES_BOPD=("POTENCIAL_PROMEDIO_2_MESES_BOPD", "sum")
+            POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD=("POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD", "sum")
         ).sort_values("PRCR_BASE_NO_REALIZADO", ascending=False)
 
         st.write("Pozos posiblemente desplazados por clasificación")
@@ -920,23 +1042,31 @@ with tabs[3]:
     st.subheader("Potencial mensual por pozo")
 
     cols = [
-        "POZO", "BATERIA", "CLASIFICACION", "ANIO_CONVERSION", "ULTIMO_MES_ACTIVO",
-        "PRCR_ULTIMO_MES", "PRAG_ULTIMO_MES", "INTERV_ULTIMO_MES",
-        "POTENCIAL_ULTIMO_MES_BOPD", "MES_ANTERIOR_ULTIMO_ACTIVO",
-        "PRCR_MES_ANTERIOR", "POTENCIAL_MES_ANTERIOR_BOPD",
-        "POTENCIAL_PROMEDIO_2_MESES_BOPD", "ULTIMA_FECHA_CON_PRCR"
+        "POZO", "BATERIA", "CLASIFICACION", "ANIO_CONVERSION",
+        "ULTIMO_MES_INTERVENIDO", "ULTIMA_FECHA_INTERVENCION",
+        "DIAS_ULTIMO_MES_INTERVENIDO",
+        "PRCR_ULTIMO_MES_INTERVENIDO", "PRAG_ULTIMO_MES_INTERVENIDO",
+        "INTERV_ULTIMO_MES_INTERVENIDO",
+        "POTENCIAL_ULTIMO_MES_INTERVENIDO_BOPD",
+        "MES_1_MES_ANTES_ULTIMA_INTERVENCION",
+        "PRCR_1_MES_ANTES_ULTIMA_INTERVENCION",
+        "POTENCIAL_1_MES_ANTES_ULTIMA_INTERVENCION_BOPD",
+        "MES_2_MES_ANTES_ULTIMA_INTERVENCION",
+        "PRCR_2_MES_ANTES_ULTIMA_INTERVENCION",
+        "POTENCIAL_2_MES_ANTES_ULTIMA_INTERVENCION_BOPD",
+        "POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD"
     ]
     cols = [c for c in cols if c in pot.columns]
     st.dataframe(vista_tabla(pot[cols]), use_container_width=True, hide_index=True)
 
-    top_pot = pot.sort_values("POTENCIAL_PROMEDIO_2_MESES_BOPD", ascending=False).head(top_n)
+    top_pot = pot.sort_values("POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD", ascending=False).head(top_n)
     if not top_pot.empty:
         fig = px.bar(
             top_pot,
             x="POZO",
-            y=["POTENCIAL_ULTIMO_MES_BOPD", "POTENCIAL_MES_ANTERIOR_BOPD"],
+            y=["POTENCIAL_ULTIMO_MES_INTERVENIDO_BOPD", "POTENCIAL_1_MES_ANTES_ULTIMA_INTERVENCION_BOPD", "POTENCIAL_2_MES_ANTES_ULTIMA_INTERVENCION_BOPD"],
             barmode="group",
-            hover_data=["BATERIA", "CLASIFICACION", "ULTIMO_MES_ACTIVO", "MES_ANTERIOR_ULTIMO_ACTIVO"]
+            hover_data=["BATERIA", "CLASIFICACION", "ULTIMO_MES_INTERVENIDO", "MES_1_MES_ANTES_ULTIMA_INTERVENCION", "MES_2_MES_ANTES_ULTIMA_INTERVENCION"]
         )
         st.plotly_chart(aplicar_layout(fig, f"Top {top_n} pozos por potencial", 560), use_container_width=True)
 
@@ -1001,7 +1131,7 @@ with tabs[6]:
             .sort_values("PRCR_BASE_NO_REALIZADO", ascending=False)
             .head(top_n)
         ),
-        "Data graf potencial": pot.sort_values("POTENCIAL_PROMEDIO_2_MESES_BOPD", ascending=False).head(top_n)
+        "Data graf potencial": pot.sort_values("POTENCIAL_PROMEDIO_3_MESES_INTERVENCION_BOPD", ascending=False).head(top_n)
     }
 
     st.download_button(
